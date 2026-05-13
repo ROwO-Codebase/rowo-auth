@@ -382,12 +382,7 @@ export default function VerificationPage() {
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
                         onClick={() => {
-                          if (__ADFS_PROVIDER_ENDPOINT__) {
-                            window.location.href = __ADFS_PROVIDER_ENDPOINT__;
-                          } else {
-                            setStatus('error');
-                            setMessage('ADFS provider is not configured.');
-                          }
+                          window.location.href = `${__API_ENDPOINT__}/api/oauth/redirect/adfs`;
                         }}
                         className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl shadow-sm transition-colors"
                       >
@@ -412,10 +407,7 @@ export default function VerificationPage() {
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
                         onClick={() => {
-                          const clientId = '1412335316395622432';
-                          const redirectUri = encodeURIComponent(`${window.location.origin}/verify/discord/callback`);
-                          const scope = 'identify';
-                          window.location.href = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}`;
+                          window.location.href = `${__API_ENDPOINT__}/api/oauth/redirect/discord`;
                         }}
                         className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-violet-600 hover:bg-violet-700 text-white font-medium rounded-xl shadow-sm transition-colors"
                       >
@@ -499,15 +491,7 @@ export default function VerificationPage() {
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
                         onClick={() => {
-                          const clientId = __GITHUB_CLIENT_ID__;
-                          if (!clientId) {
-                            setStatus('error');
-                            setMessage('GitHub OAuth is not configured.');
-                            return;
-                          }
-                          const redirectUri = encodeURIComponent(`${window.location.origin}/verify/github/callback`);
-                          const scope = encodeURIComponent('user:email');
-                          window.location.href = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&scope=${scope}`;
+                          window.location.href = `${__API_ENDPOINT__}/api/oauth/redirect/github`;
                         }}
                         className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-slate-900 hover:bg-slate-800 text-white font-medium rounded-xl shadow-sm transition-colors"
                       >

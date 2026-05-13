@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ShieldAlert, Search, MoreVertical, X, AlertTriangle, ShieldOff, Save, ShieldCheck, Key, CheckCircle, Info, Plus, Edit2, Trash2, RotateCcw, Pencil, RefreshCw } from 'lucide-react';
+import { ShieldAlert, Search, MoreVertical, X, AlertTriangle, ShieldOff, Save, ShieldCheck, Key, CheckCircle, Info, Plus, Edit2, Trash2, RotateCcw, Pencil, RefreshCw, Bell } from 'lucide-react';
 import { format } from 'date-fns';
 import { clsx } from 'clsx';
 import ReactMarkdown from 'react-markdown';
@@ -55,7 +55,7 @@ export default function AdminPanel() {
   const [confirmRotateOpen, setConfirmRotateOpen] = useState(false);
   const [newTokenAlert, setNewTokenAlert] = useState<{isOpen: boolean, token: string}>({isOpen: false, token: ''});
   const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'accounts' | 'blacklist' | 'batch'>('accounts');
+  const [activeTab, setActiveTab] = useState<'accounts' | 'blacklist' | 'batch' | 'settings'>('accounts');
   const [blacklist, setBlacklist] = useState<any[]>([]);
   const [loadingBlacklist, setLoadingBlacklist] = useState(false);
 
@@ -210,14 +210,6 @@ export default function AdminPanel() {
               Logged in as <span className="text-indigo-600">{currentAdmin.username}</span> ({currentAdmin.role})
             </div>
           )}
-          <button
-            onClick={handleRotateTokenClick}
-            className="text-sm text-red-600 hover:text-red-700 font-medium px-3 py-1.5 rounded-lg hover:bg-red-50 transition-colors flex items-center gap-1.5"
-            title="Warning: This will invalidate your current token"
-          >
-            <AlertTriangle className="w-4 h-4" />
-            Rotate Token
-          </button>
         </div>
       </div>
 
@@ -256,9 +248,21 @@ export default function AdminPanel() {
             </button>
           </>
         )}
+        <button
+          onClick={() => setActiveTab('settings')}
+          className={clsx(
+            "px-4 py-2 text-sm font-medium transition-colors relative",
+            activeTab === 'settings' ? "text-indigo-600" : "text-slate-500 hover:text-slate-700"
+          )}
+        >
+          Settings
+          {activeTab === 'settings' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
+        </button>
       </div>
 
-      {activeTab === 'accounts' || currentAdmin?.role !== 'admin' ? (
+      {activeTab === 'settings' ? (
+        <SettingsTab token={token} onRotateToken={handleRotateTokenClick} />
+      ) : activeTab === 'accounts' || currentAdmin?.role !== 'admin' ? (
         <>
           <div className="flex items-center justify-end gap-2 mb-4">
             <button
@@ -1263,6 +1267,172 @@ function BatchTab({ token, onUpdate }: { token: string; onUpdate: () => void }) 
         confirmText={action === 'verify' ? 'Verify' : 'Blacklist'}
         isDangerous={action === 'blacklist'}
       />
+    </div>
+  );
+}
+
+function SettingsTab({ token, onRotateToken }: { token: string; onRotateToken: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [email, setEmail] = useState('');
+  const [enabled, setEnabled] = useState(false);
+  const [status, setStatus] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await fetch(`${__API_ENDPOINT__}/api/admin/preferences`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json();
+        if (data.success) {
+          setEmail(data.notification_email || '');
+          setEnabled(Boolean(data.manual_notification_enabled));
+        }
+      } catch {
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, [token]);
+
+  const trimmedEmail = email.trim();
+  const cannotEnableWithoutEmail = enabled && trimmedEmail === '';
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (cannotEnableWithoutEmail) return;
+    setSaving(true);
+    setStatus(null);
+    try {
+      const res = await fetch(`${__API_ENDPOINT__}/api/admin/preferences`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          notification_email: trimmedEmail === '' ? null : trimmedEmail,
+          manual_notification_enabled: enabled,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setEmail(data.notification_email || '');
+        setEnabled(Boolean(data.manual_notification_enabled));
+        setStatus({ kind: 'success', text: 'Preferences saved.' });
+      } else {
+        setStatus({ kind: 'error', text: data.message || 'Failed to save preferences.' });
+      }
+    } catch {
+      setStatus({ kind: 'error', text: 'Failed to save preferences.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="bg-indigo-100 p-2 rounded-lg text-indigo-600">
+            <Bell className="w-5 h-5" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Notification preferences</h2>
+            <p className="text-sm text-slate-500 mt-0.5">
+              Get an email when a user submits a new manual verification request.
+            </p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="text-sm text-slate-500 py-6 text-center">Loading preferences...</div>
+        ) : (
+          <form onSubmit={handleSave} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Notification email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                className="block w-full px-4 py-2.5 rounded-xl border border-slate-300 shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors"
+              />
+            </div>
+
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => setEnabled(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+              />
+              <div>
+                <div className="text-sm font-medium text-slate-900">
+                  Email me when a new manual verification request is submitted
+                </div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  Unsubscribe by unchecking and saving. Your email is preserved so you can re-enable later.
+                </div>
+              </div>
+            </label>
+
+            {cannotEnableWithoutEmail && (
+              <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                Set a notification email before subscribing.
+              </div>
+            )}
+
+            {status && (
+              <div
+                className={clsx(
+                  'text-xs rounded-lg px-3 py-2 border',
+                  status.kind === 'success'
+                    ? 'text-emerald-700 bg-emerald-50 border-emerald-200'
+                    : 'text-red-700 bg-red-50 border-red-200'
+                )}
+              >
+                {status.text}
+              </div>
+            )}
+
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={saving || cannotEnableWithoutEmail}
+                className="flex items-center gap-2 py-2 px-4 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-xl shadow-sm transition-colors disabled:opacity-50"
+              >
+                <Save className="w-4 h-4" />
+                {saving ? 'Saving...' : 'Save preferences'}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="bg-red-100 p-2 rounded-lg text-red-600">
+            <Key className="w-5 h-5" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Access token</h2>
+            <p className="text-sm text-slate-500 mt-0.5">
+              Rotating your token immediately invalidates the current one. You will need to sign in again with the new token.
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onRotateToken}
+          className="flex items-center gap-2 py-2 px-4 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-xl shadow-sm transition-colors"
+        >
+          <AlertTriangle className="w-4 h-4" />
+          Rotate Token
+        </button>
+      </div>
     </div>
   );
 }

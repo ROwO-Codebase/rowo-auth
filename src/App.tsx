@@ -19,11 +19,9 @@ import FAQPage from './pages/FAQPage';
 
 function AdfsRedirect() {
   useEffect(() => {
-    if (__ADFS_PROVIDER_ENDPOINT__) {
-      window.location.href = __ADFS_PROVIDER_ENDPOINT__;
-    }
+    window.location.href = `${__API_ENDPOINT__}/api/oauth/redirect/adfs`;
   }, []);
-  return <div className="p-8 text-center text-slate-500">{__ADFS_PROVIDER_ENDPOINT__ ? 'Redirecting to ADFS...' : 'ADFS provider is not configured.'}</div>;
+  return <div className="p-8 text-center text-slate-500">Redirecting to ADFS...</div>;
 }
 
 export default function App() {

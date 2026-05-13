@@ -5,9 +5,7 @@
   "type": "module",
   "config": {
     "api_endpoint": "https://api.rowo.link",
-    "icon_url": "https://cdn.rowo.link/logo.png",
-    "adfs_provider_endpoint": "https://csclub.uwaterloo.ca/~y445wang/",
-    "github_client_id": "Ov23liHMshtBPMhYQqcw"
+    "icon_url": "https://cdn.rowo.link/logo.png"
   },
   "scripts": {
     "dev": "vite",
