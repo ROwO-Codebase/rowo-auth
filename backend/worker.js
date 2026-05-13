@@ -501,6 +501,33 @@ async function githubApiJson(url, options, errorPrefix) {
   return parsedBody;
 }
 
+function buildOAuthRedirectUrl(env, provider) {
+  if (provider === 'github') {
+    if (!env.GITHUB_CLIENT_ID || !env.GITHUB_REDIRECT_URI) return null;
+    const params = new URLSearchParams({
+      client_id: env.GITHUB_CLIENT_ID,
+      redirect_uri: env.GITHUB_REDIRECT_URI,
+      scope: 'user:email',
+    });
+    return `https://github.com/login/oauth/authorize?${params}`;
+  }
+  if (provider === 'discord') {
+    if (!env.DISCORD_CLIENT_ID || !env.DISCORD_REDIRECT_URI) return null;
+    const params = new URLSearchParams({
+      client_id: env.DISCORD_CLIENT_ID,
+      redirect_uri: env.DISCORD_REDIRECT_URI,
+      response_type: 'code',
+      scope: 'identify',
+    });
+    return `https://discord.com/api/oauth2/authorize?${params}`;
+  }
+  if (provider === 'adfs') {
+    const endpoint = String(env.ADFS_PROVIDER_ENDPOINT || '').trim();
+    return endpoint || null;
+  }
+  return undefined;
+}
+
 async function exchangeGithubOauthCode(env, code) {
   const clientId = env.GITHUB_CLIENT_ID;
   const clientSecret = env.GITHUB_CLIENT_SECRET;
@@ -768,6 +795,19 @@ async function handleRequest(request, env) {
     if (method === 'GET' && pathname === '/api/verify/discord/trusted-invites') {
       const invites = await getTrustedDiscordInviteCodes(env);
       return jsonResponse({ success: true, invites });
+    }
+
+    const oauthRedirectMatch = pathname.match(/^\/api\/oauth\/redirect\/([^/]+)$/);
+    if (method === 'GET' && oauthRedirectMatch) {
+      const provider = decodeURIComponent(oauthRedirectMatch[1]).toLowerCase();
+      const target = buildOAuthRedirectUrl(env, provider);
+      if (target === undefined) {
+        return jsonResponse({ success: false, message: 'Unknown OAuth provider.' }, 404);
+      }
+      if (target === null) {
+        return jsonResponse({ success: false, message: `${provider} OAuth is not configured.` }, 500);
+      }
+      return Response.redirect(target, 302);
     }
 
     const verifyMatch = pathname.match(/^\/api\/verify\/([^/]+)$/);
