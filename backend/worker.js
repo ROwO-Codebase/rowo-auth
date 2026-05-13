@@ -168,7 +168,7 @@ async function getSignatureKey(secretAccessKey, dateStamp, region, service) {
   return hmacSha256Raw(kService, 'aws4_request');
 }
 
-async function sendVerificationEmailWithSes(env, toEmail, code) {
+async function sendEmailWithSes(env, toEmail, subject, bodyText) {
   const accessKeyId = env.AWS_ACCESS_KEY_ID;
   const secretAccessKey = env.AWS_SECRET_ACCESS_KEY;
   const region = env.AWS_REGION || 'us-east-1';
@@ -191,8 +191,8 @@ async function sendVerificationEmailWithSes(env, toEmail, code) {
     Version: '2010-12-01',
     'Source': `${fromName} <${fromEmail}>`,
     'Destination.ToAddresses.member.1': toEmail,
-    'Message.Subject.Data': 'Your Verification Code',
-    'Message.Body.Text.Data': `Your verification code is: ${code}. This code expires in 10 minutes.`,
+    'Message.Subject.Data': subject,
+    'Message.Body.Text.Data': bodyText,
   }).toString();
 
   const contentType = 'application/x-www-form-urlencoded; charset=utf-8';
@@ -227,6 +227,15 @@ async function sendVerificationEmailWithSes(env, toEmail, code) {
     const errText = await response.text();
     throw new Error(`SES send failed: ${response.status} ${errText}`);
   }
+}
+
+async function sendVerificationEmailWithSes(env, toEmail, code) {
+  return sendEmailWithSes(
+    env,
+    toEmail,
+    'Your Verification Code',
+    `Your verification code is: ${code}. This code expires in 10 minutes.`
+  );
 }
 
 async function consumeGlobalEmailSendQuota(env) {
@@ -708,6 +717,58 @@ async function ensureNotBlacklisted(env, wechatId) {
   );
 }
 
+async function notifyAdminsOfManualVerification(env, wechatId, reason) {
+  let recipients;
+  try {
+    recipients = await queryAll(
+      env,
+      `
+        SELECT notification_email
+        FROM admins
+        WHERE manual_notification_enabled = 1
+          AND notification_email IS NOT NULL
+          AND TRIM(notification_email) != ''
+      `
+    );
+  } catch (error) {
+    logServerError('notify_admin_manual_lookup', error);
+    return;
+  }
+  if (recipients.length === 0) return;
+
+  const subject = 'New manual verification request';
+  const body =
+    `A new manual verification request has been submitted.\n\n` +
+    `WeChat ID: ${wechatId}\n` +
+    `Reason: ${reason}\n\n` +
+    `Review at: https://rowo.link/admin\n\n` +
+    `You are receiving this because you subscribed to manual verification notifications. ` +
+    `To unsubscribe, sign in to the admin panel and open the Settings tab.`;
+
+  for (const row of recipients) {
+    let quota;
+    try {
+      quota = await consumeGlobalEmailSendQuota(env);
+    } catch (error) {
+      logServerError('notify_admin_manual_quota', error);
+      return;
+    }
+    if (!quota.allowed) {
+      logServerError(
+        'notify_admin_manual_quota_exhausted',
+        new Error('Email send quota exhausted; skipping remaining notifications.'),
+        { retry_after_seconds: quota.retryAfterSeconds }
+      );
+      return;
+    }
+    try {
+      await sendEmailWithSes(env, row.notification_email, subject, body);
+    } catch (error) {
+      logServerError('notify_admin_manual_send', error);
+    }
+  }
+}
+
 async function requireAuth(request, env) {
   const authHeader = request.headers.get('authorization') || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
@@ -786,7 +847,7 @@ function corsPreflightResponse(request, env) {
   return new Response(null, { status: 204, headers });
 }
 
-async function handleRequest(request, env) {
+async function handleRequest(request, env, ctx) {
 
     const url = new URL(request.url);
     const { pathname } = url;
@@ -1634,6 +1695,10 @@ async function handleRequest(request, env) {
         [wechat_id, 'blue', 'document', 'Manual verification reason', reasonText, wechat_id, 'private']
       );
 
+      if (ctx && typeof ctx.waitUntil === 'function') {
+        ctx.waitUntil(notifyAdminsOfManualVerification(env, wechat_id, reasonText));
+      }
+
       return jsonResponse({
         success: true,
         message: 'Manual Verification application submitted and is pending approval.',
@@ -2212,6 +2277,82 @@ async function handleRequest(request, env) {
       return jsonResponse({ success: true, token: newToken });
     }
 
+    if (method === 'GET' && pathname === '/api/admin/preferences') {
+      const auth = await requireAuth(request, env);
+      if (auth.response) return auth.response;
+
+      const row = await queryFirst(
+        env,
+        'SELECT notification_email, manual_notification_enabled FROM admins WHERE id = ?',
+        [auth.admin.id]
+      );
+      return jsonResponse({
+        success: true,
+        notification_email: row?.notification_email || null,
+        manual_notification_enabled: Number(row?.manual_notification_enabled || 0) === 1,
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/admin/preferences') {
+      const auth = await requireAuth(request, env);
+      if (auth.response) return auth.response;
+
+      const body = await parseJson(request);
+      const hasEmailField = Object.prototype.hasOwnProperty.call(body, 'notification_email');
+      const hasEnabledField = Object.prototype.hasOwnProperty.call(body, 'manual_notification_enabled');
+
+      let newEmail;
+      if (hasEmailField) {
+        const raw = body.notification_email;
+        if (raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+          newEmail = null;
+        } else if (typeof raw === 'string') {
+          const normalized = normalizeEmail(raw);
+          if (!getEmailDomain(normalized) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+            return jsonResponse({ success: false, message: 'Invalid email.' }, 400);
+          }
+          newEmail = normalized;
+        } else {
+          return jsonResponse({ success: false, message: 'notification_email must be a string or null.' }, 400);
+        }
+      }
+
+      let newEnabled;
+      if (hasEnabledField) {
+        newEnabled = body.manual_notification_enabled === true ? 1 : 0;
+      }
+
+      const effectiveEmail = hasEmailField ? newEmail : auth.admin.notification_email || null;
+      const effectiveEnabled = hasEnabledField
+        ? newEnabled
+        : Number(auth.admin.manual_notification_enabled || 0);
+
+      if (effectiveEnabled === 1 && !effectiveEmail) {
+        return jsonResponse({ success: false, message: 'Set a notification email before subscribing.' }, 400);
+      }
+
+      const updates = [];
+      const params = [];
+      if (hasEmailField) {
+        updates.push('notification_email = ?');
+        params.push(newEmail);
+      }
+      if (hasEnabledField) {
+        updates.push('manual_notification_enabled = ?');
+        params.push(newEnabled);
+      }
+      if (updates.length > 0) {
+        params.push(auth.admin.id);
+        await execRun(env, `UPDATE admins SET ${updates.join(', ')} WHERE id = ?`, params);
+      }
+
+      return jsonResponse({
+        success: true,
+        notification_email: effectiveEmail,
+        manual_notification_enabled: effectiveEnabled === 1,
+      });
+    }
+
     if (method === 'POST' && pathname === '/api/admin/login') {
       const body = await parseJson(request);
       const { token } = body;
@@ -2228,14 +2369,14 @@ async function handleRequest(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method.toUpperCase() === 'OPTIONS') {
       return corsPreflightResponse(request, env);
     }
 
     let response;
     try {
-      response = await handleRequest(request, env);
+      response = await handleRequest(request, env, ctx);
     } catch (error) {
       response = genericError('unhandled_request_error', error, 500, 'Internal server error.', {
         method: request.method,

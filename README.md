@@ -152,6 +152,13 @@ If your D1 database name differs from `rowo-auth-db`, replace it in the command 
 
 The schema includes `discord_trusted_servers` and seeds one active trusted guild/role pair. Update that table in D1 to manage trusted Discord sources.
 
+For an existing deployment upgrading to admin notification preferences, run the following ALTER statements (skip if `backend/schema.sql` was applied fresh):
+
+```sh
+npx wrangler d1 execute rowo-auth-db --command "ALTER TABLE admins ADD COLUMN notification_email TEXT;" --config backend/wrangler.toml --env production
+npx wrangler d1 execute rowo-auth-db --command "ALTER TABLE admins ADD COLUMN manual_notification_enabled INTEGER NOT NULL DEFAULT 0;" --config backend/wrangler.toml --env production
+```
+
 ## API Route Overview
 
 Core verification routes:
@@ -175,6 +182,8 @@ Admin routes:
 
 - `POST /api/admin/login`
 - `POST /api/admin/rotate-token`
+- `GET /api/admin/preferences`
+- `POST /api/admin/preferences`
 - `GET /api/admin/accounts`
 - `GET /api/admin/stats`
 - `GET /api/admin/blacklist`

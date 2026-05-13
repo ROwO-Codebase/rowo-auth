@@ -20,7 +20,9 @@ CREATE TABLE admins (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT UNIQUE,
   access_token TEXT UNIQUE,
-  role TEXT DEFAULT 'admin'
+  role TEXT DEFAULT 'admin',
+  notification_email TEXT,
+  manual_notification_enabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE account_info (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
