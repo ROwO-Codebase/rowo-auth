@@ -15,14 +15,6 @@ CREATE TABLE accounts (
   manual_time DATETIME,
   reverified_at DATETIME
 );
-CREATE TABLE admins (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT UNIQUE,
-  access_token TEXT UNIQUE,
-  role TEXT DEFAULT 'admin',
-  notification_email TEXT,
-  manual_notification_enabled INTEGER NOT NULL DEFAULT 0
-);
 CREATE TABLE account_info (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   wechat_id TEXT,
@@ -109,13 +101,41 @@ CREATE TABLE user_accounts (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_login_at TEXT,
   last_wechat_change_at TEXT,
-  password_changed_at TEXT
+  password_changed_at TEXT,
+  role TEXT NOT NULL DEFAULT 'user'
+    CHECK(role IN ('user','moderator','admin','super_admin')),
+  role_assigned_by TEXT REFERENCES user_accounts(id),
+  role_assigned_at TEXT,
+  notification_email TEXT,
+  manual_notification_enabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE login_rate_limits (
   bucket_key TEXT PRIMARY KEY,
   attempt_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE oauth_clients (
+  client_id TEXT PRIMARY KEY,
+  client_secret_hmac TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  icon_url TEXT,
+  allowed_domain TEXT NOT NULL,
+  allowed_redirect_uris TEXT NOT NULL,
+  allowed_scopes TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE oauth_authorization_codes (
+  code_hash TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL REFERENCES oauth_clients(client_id),
+  user_id TEXT NOT NULL REFERENCES user_accounts(id),
+  redirect_uri TEXT NOT NULL,
+  granted_scopes TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 DELETE FROM sqlite_sequence;
 CREATE INDEX idx_email_verification_expires_at
@@ -138,3 +158,10 @@ CREATE INDEX idx_user_accounts_created_at
   ON user_accounts(created_at);
 CREATE INDEX idx_login_rate_limits_updated_at
   ON login_rate_limits(updated_at);
+CREATE INDEX idx_user_accounts_role_assigned_by
+  ON user_accounts(role_assigned_by)
+  WHERE role_assigned_by IS NOT NULL;
+CREATE INDEX idx_oauth_codes_expires_at
+  ON oauth_authorization_codes(expires_at);
+CREATE INDEX idx_oauth_codes_user_id
+  ON oauth_authorization_codes(user_id);

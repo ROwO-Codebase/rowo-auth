@@ -188,6 +188,9 @@ const PBKDF2_SALT_BYTES = 16;
 const PBKDF2_HASH_BYTES = 32;
 const USER_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const BIND_TOKEN_TTL_SECONDS = 10 * 60;
+const OAUTH_CODE_TTL_SECONDS = 15 * 60;
+const OAUTH_VALID_SCOPES = new Set(['basic', 'verification', 'wechat']);
+const OAUTH_GATED_SCOPES = new Set(['verification', 'wechat']);
 const LOGIN_ATTEMPTS_PER_MINUTE = 10;
 const RESERVED_USERNAMES = new Set([
   'admin', 'root', 'system', 'api', 'support', 'security', 'rowo', 'null', 'undefined', 'me',
@@ -466,6 +469,7 @@ function publicUserShape(user) {
     last_login_at: user.last_login_at || null,
     last_wechat_change_at: user.last_wechat_change_at || null,
     password_changed_at: user.password_changed_at || null,
+    role: user.role || 'user',
   };
 }
 
@@ -1093,10 +1097,11 @@ async function notifyAdminsOfManualVerification(env, wechatId, reason) {
       env,
       `
         SELECT notification_email
-        FROM admins
+        FROM user_accounts
         WHERE manual_notification_enabled = 1
           AND notification_email IS NOT NULL
           AND TRIM(notification_email) != ''
+          AND role IN ('moderator','admin','super_admin')
       `
     );
   } catch (error) {
@@ -1138,31 +1143,46 @@ async function notifyAdminsOfManualVerification(env, wechatId, reason) {
   }
 }
 
-async function requireAuth(request, env) {
-  const authHeader = request.headers.get('authorization') || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+const ROLE_RANK = { user: 0, moderator: 1, admin: 2, super_admin: 3 };
 
-  if (!token) {
-    return { response: jsonResponse({ success: false, message: 'Unauthorized' }, 401) };
-  }
-
-  const admin = await queryFirst(env, 'SELECT * FROM admins WHERE access_token = ?', [token]);
-  if (!admin) {
-    return { response: jsonResponse({ success: false, message: 'Invalid token' }, 401) };
-  }
-
-  return { admin };
+function rolesAtLeast(role, minRole) {
+  return (ROLE_RANK[role] ?? -1) >= (ROLE_RANK[minRole] ?? Infinity);
 }
 
-async function requireAdmin(request, env) {
-  const auth = await requireAuth(request, env);
-  if (auth.response) {
-    return auth;
+// Shapes a user_accounts row into the `auth.admin` object the legacy admin
+// endpoints expect (username, id, role, notification_email, ...). This lets
+// us delete the `admins` table without rewriting every endpoint body.
+function userToAdminShape(user) {
+  return {
+    id: user.id,
+    username: user.username_display,
+    role: user.role,
+    notification_email: user.notification_email || null,
+    manual_notification_enabled: Number(user.manual_notification_enabled || 0),
+  };
+}
+
+async function requireRole(request, env, minRole) {
+  const auth = await requireUserAuth(request, env);
+  if (auth.response) return auth;
+  if (!rolesAtLeast(auth.user.role, minRole)) {
+    return { response: jsonResponse({ success: false, message: 'Forbidden' }, 403) };
   }
-  if (auth.admin.role !== 'admin') {
-    return { response: jsonResponse({ success: false, message: 'Forbidden: Admins only' }, 403) };
-  }
-  return auth;
+  return { user: auth.user, admin: userToAdminShape(auth.user) };
+}
+
+// Parses ?page=&page_size=&q= into validated values plus a ready-to-bind LIKE
+// pattern. `like` is null when q is empty, so callers can skip the WHERE clause.
+function parsePaginationParams(url, { defaultPageSize = 50, maxPageSize = 200 } = {}) {
+  const rawPage = Number(url.searchParams.get('page'));
+  const rawSize = Number(url.searchParams.get('page_size'));
+  const page = Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1;
+  const pageSize = Number.isFinite(rawSize) && rawSize >= 1
+    ? Math.min(Math.floor(rawSize), maxPageSize)
+    : defaultPageSize;
+  const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
+  const like = q ? `%${q.replace(/[%_\\]/g, (m) => `\\${m}`)}%` : null;
+  return { page, pageSize, q, like };
 }
 
 function resolveAllowedOrigin(request, env) {
@@ -1214,6 +1234,66 @@ function withCors(response, request, env) {
 function corsPreflightResponse(request, env) {
   const headers = new Headers(buildCorsHeaders(request, env));
   return new Response(null, { status: 204, headers });
+}
+
+// ----------------------------------------------------------------------------
+// OAuth provider helpers ("Sign in with ROwO"). Authorization codes are stored
+// hashed (sha256Hex) so a leaked DB doesn't yield replayable codes; client
+// secrets are HMAC-hashed via hmacSensitive (v2:hex). See plans/add-a-oauth-flow-noble-turtle.md.
+// ----------------------------------------------------------------------------
+
+function parseJsonArrayField(value, field) {
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) throw new Error('not an array');
+    return parsed;
+  } catch {
+    throw new Error(`invalid ${field}`);
+  }
+}
+
+function parseScopeParam(rawScope) {
+  if (rawScope == null) return [];
+  const tokens = String(rawScope).split(/\s+/).map((s) => s.trim()).filter(Boolean);
+  return Array.from(new Set(tokens));
+}
+
+function validateRedirectUri(uri, allowedList) {
+  if (!uri || typeof uri !== 'string') return false;
+  if (!Array.isArray(allowedList)) return false;
+  return allowedList.includes(uri);
+}
+
+function classifyScopes(requestedScopes, allowedScopes, userHasWechat) {
+  const valid = [];
+  const gatedLocked = [];
+  const unknown = [];
+  const notPermitted = [];
+  const allowed = new Set(allowedScopes);
+  for (const scope of requestedScopes) {
+    if (!OAUTH_VALID_SCOPES.has(scope)) {
+      unknown.push(scope);
+      continue;
+    }
+    if (!allowed.has(scope)) {
+      notPermitted.push(scope);
+      continue;
+    }
+    if (OAUTH_GATED_SCOPES.has(scope) && !userHasWechat) {
+      gatedLocked.push(scope);
+      continue;
+    }
+    valid.push(scope);
+  }
+  return { valid, gated_locked: gatedLocked, unknown, not_permitted: notPermitted };
+}
+
+function buildOAuthRedirect(redirectUri, params) {
+  const url = new URL(redirectUri);
+  if (params.code) url.searchParams.set('code', params.code);
+  if (params.error) url.searchParams.set('error', params.error);
+  if (params.state != null && params.state !== '') url.searchParams.set('state', String(params.state));
+  return url.toString();
 }
 
 async function handleRequest(request, env, ctx) {
@@ -2665,7 +2745,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'GET' && pathname === '/api/admin/stats') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const verifiedRow = await queryFirst(env, 'SELECT COUNT(*) as count FROM accounts WHERE verified_status = 1');
@@ -2678,41 +2758,55 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'GET' && pathname === '/api/admin/accounts') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
-      let accounts;
-      if (auth.admin.role === 'moderator') {
-        accounts = await queryAll(
-          env,
-          `
-            SELECT * FROM accounts
-            WHERE manual_status = 'pending'
-            ORDER BY verification_time DESC
-          `
-        );
-      } else {
-        accounts = await queryAll(
-          env,
-          `
-            SELECT * FROM accounts
-            ORDER BY
-              CASE WHEN manual_status = 'pending' THEN 0 ELSE 1 END,
-              verification_time DESC
-          `
-        );
+      const { page, pageSize, like } = parsePaginationParams(url);
+      const isModerator = auth.admin.role === 'moderator';
+
+      const where = [];
+      const params = [];
+      if (isModerator) {
+        where.push("manual_status = 'pending'");
       }
+      if (like) {
+        where.push(
+          "(LOWER(wechat_id) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(student_name, '')) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(student_id, '')) LIKE ? ESCAPE '\\')"
+        );
+        params.push(like, like, like);
+      }
+      const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+      const countRow = await queryFirst(
+        env,
+        `SELECT COUNT(*) AS c FROM accounts ${whereClause}`,
+        params
+      );
+      const total = Number(countRow?.c ?? 0);
+
+      const orderBy = isModerator
+        ? 'ORDER BY verification_time DESC'
+        : "ORDER BY CASE WHEN manual_status = 'pending' THEN 0 ELSE 1 END, verification_time DESC";
+
+      const accounts = await queryAll(
+        env,
+        `SELECT * FROM accounts ${whereClause} ${orderBy} LIMIT ? OFFSET ?`,
+        [...params, pageSize, (page - 1) * pageSize]
+      );
 
       return jsonResponse({
         success: true,
         accounts,
+        total,
+        page,
+        page_size: pageSize,
         admin: { username: auth.admin.username, role: auth.admin.role },
       });
     }
 
     const adminInfoMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/info$/);
     if (method === 'GET' && adminInfoMatch) {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(adminInfoMatch[1]);
@@ -2725,7 +2819,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'POST' && adminInfoMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(adminInfoMatch[1]);
@@ -2746,7 +2840,7 @@ async function handleRequest(request, env, ctx) {
 
     const adminEditInfoMatch = pathname.match(/^\/api\/admin\/info\/([^/]+)$/);
     if (method === 'PUT' && adminEditInfoMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
 
       const id = decodeURIComponent(adminEditInfoMatch[1]);
@@ -2767,7 +2861,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'DELETE' && adminEditInfoMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
 
       const id = decodeURIComponent(adminEditInfoMatch[1]);
@@ -2777,7 +2871,7 @@ async function handleRequest(request, env, ctx) {
 
     const revokeMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/(revoke|unrevoke)$/);
     if (method === 'POST' && revokeMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(revokeMatch[1]);
@@ -2794,7 +2888,7 @@ async function handleRequest(request, env, ctx) {
 
     const manualMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/manual$/);
     if (method === 'POST' && manualMatch) {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(manualMatch[1]);
@@ -2848,7 +2942,7 @@ async function handleRequest(request, env, ctx) {
 
     const contactMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/contact$/);
     if (method === 'POST' && contactMatch) {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(contactMatch[1]);
@@ -2883,7 +2977,7 @@ async function handleRequest(request, env, ctx) {
 
     const blacklistMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/blacklist$/);
     if (method === 'POST' && blacklistMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(blacklistMatch[1]);
@@ -2935,7 +3029,7 @@ async function handleRequest(request, env, ctx) {
 
     const unblacklistMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/unblacklist$/);
     if (method === 'POST' && unblacklistMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(unblacklistMatch[1]);
@@ -2990,7 +3084,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'POST' && pathname === '/api/admin/batch/verify') {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const body = await parseJson(request);
@@ -3068,7 +3162,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'POST' && pathname === '/api/admin/batch/blacklist') {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const body = await parseJson(request);
@@ -3134,7 +3228,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'GET' && pathname === '/api/admin/blacklist') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const blacklist = await queryAll(
@@ -3150,30 +3244,47 @@ async function handleRequest(request, env, ctx) {
       return jsonResponse({ success: true, blacklist });
     }
 
-    if (method === 'POST' && pathname === '/api/admin/rotate-token') {
-      const auth = await requireAuth(request, env);
-      if (auth.response) return auth.response;
-
-      const newToken = `${crypto.randomUUID()}${Date.now().toString(36)}`;
-      await execRun(env, 'UPDATE admins SET access_token = ? WHERE id = ?', [newToken, auth.admin.id]);
-      return jsonResponse({ success: true, token: newToken });
-    }
-
     if (method === 'GET' && pathname === '/api/admin/users') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
+
+      const { page, pageSize, like } = parsePaginationParams(url);
+
+      const where = [];
+      const params = [];
+      if (like) {
+        where.push(
+          "(LOWER(username_normalized) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(wechat_id, '')) LIKE ? ESCAPE '\\' OR LOWER(id) LIKE ? ESCAPE '\\')"
+        );
+        params.push(like, like, like);
+      }
+      const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+      const countRow = await queryFirst(
+        env,
+        `SELECT COUNT(*) AS c FROM user_accounts ${whereClause}`,
+        params
+      );
+      const total = Number(countRow?.c ?? 0);
+
       const rows = await queryAll(
         env,
         `
           SELECT id, username_display, wechat_id, created_at, last_login_at,
-                 last_wechat_change_at, password_changed_at
+                 last_wechat_change_at, password_changed_at, role
           FROM user_accounts
+          ${whereClause}
           ORDER BY created_at DESC
-          LIMIT 500
-        `
+          LIMIT ? OFFSET ?
+        `,
+        [...params, pageSize, (page - 1) * pageSize]
       );
+
       return jsonResponse({
         success: true,
+        total,
+        page,
+        page_size: pageSize,
         users: rows.map((row) => ({
           id: row.id,
           username: row.username_display,
@@ -3182,13 +3293,14 @@ async function handleRequest(request, env, ctx) {
           last_login_at: row.last_login_at || null,
           last_wechat_change_at: row.last_wechat_change_at || null,
           password_changed_at: row.password_changed_at || null,
+          role: row.role || 'user',
         })),
       });
     }
 
     const userResetMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/reset-password$/);
     if (method === 'POST' && userResetMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
       const id = decodeURIComponent(userResetMatch[1]);
       const body = await parseJson(request);
@@ -3196,9 +3308,18 @@ async function handleRequest(request, env, ctx) {
       if (!passwordCheck.ok) {
         return jsonResponse({ success: false, message: passwordCheck.message }, 400);
       }
-      const target = await queryFirst(env, 'SELECT id FROM user_accounts WHERE id = ?', [id]);
+      const target = await queryFirst(env, 'SELECT id, role FROM user_accounts WHERE id = ?', [id]);
       if (!target) {
         return jsonResponse({ success: false, message: 'User not found.' }, 404);
+      }
+      // Strict hierarchy: actor must rank strictly above target.
+      const actorRank = ROLE_RANK[auth.user.role] ?? -1;
+      const targetRank = ROLE_RANK[target.role] ?? 0;
+      if (actorRank <= targetRank) {
+        return jsonResponse({
+          success: false,
+          message: 'You cannot reset the password of a user at your level or above.',
+        }, 403);
       }
       const newHash = await hashPassword(String(body.new_password));
       await execRun(
@@ -3215,7 +3336,7 @@ async function handleRequest(request, env, ctx) {
 
     const userUnbindMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/unbind-wechat$/);
     if (method === 'POST' && userUnbindMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
       const id = decodeURIComponent(userUnbindMatch[1]);
       const target = await queryFirst(env, 'SELECT id FROM user_accounts WHERE id = ?', [id]);
@@ -3231,12 +3352,12 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'GET' && pathname === '/api/admin/preferences') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const row = await queryFirst(
         env,
-        'SELECT notification_email, manual_notification_enabled FROM admins WHERE id = ?',
+        'SELECT notification_email, manual_notification_enabled FROM user_accounts WHERE id = ?',
         [auth.admin.id]
       );
       return jsonResponse({
@@ -3247,7 +3368,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'POST' && pathname === '/api/admin/preferences') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const body = await parseJson(request);
@@ -3296,7 +3417,7 @@ async function handleRequest(request, env, ctx) {
       }
       if (updates.length > 0) {
         params.push(auth.admin.id);
-        await execRun(env, `UPDATE admins SET ${updates.join(', ')} WHERE id = ?`, params);
+        await execRun(env, `UPDATE user_accounts SET ${updates.join(', ')}, updated_at = datetime('now') WHERE id = ?`, params);
       }
 
       return jsonResponse({
@@ -3306,16 +3427,494 @@ async function handleRequest(request, env, ctx) {
       });
     }
 
-    if (method === 'POST' && pathname === '/api/admin/login') {
-      const body = await parseJson(request);
-      const { token } = body;
-      const admin = await queryFirst(env, 'SELECT * FROM admins WHERE access_token = ?', [token]);
+    if (method === 'GET' && pathname === '/api/admin/roles/search') {
+      const auth = await requireRole(request, env, 'admin');
+      if (auth.response) return auth.response;
+      const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
+      if (q.length < 1) {
+        return jsonResponse({ success: true, results: [] });
+      }
+      const like = `%${q.replace(/[%_]/g, (m) => `\\${m}`)}%`;
+      const rows = await queryAll(
+        env,
+        `
+          SELECT id, username_display, role, role_assigned_by
+          FROM user_accounts
+          WHERE LOWER(username_normalized) LIKE ? ESCAPE '\\'
+          ORDER BY username_normalized
+          LIMIT 20
+        `,
+        [like]
+      );
+      return jsonResponse({
+        success: true,
+        results: rows.map((row) => ({
+          id: row.id,
+          username: row.username_display,
+          role: row.role || 'user',
+          role_assigned_by: row.role_assigned_by || null,
+        })),
+      });
+    }
 
-      if (admin) {
-        return jsonResponse({ success: true, role: admin.role });
+    if (method === 'GET' && pathname === '/api/admin/roles/list') {
+      const auth = await requireRole(request, env, 'admin');
+      if (auth.response) return auth.response;
+      const isSuper = auth.user.role === 'super_admin';
+
+      const shape = (row) => ({
+        id: row.id,
+        username: row.username_display,
+        role: row.role,
+        role_assigned_by: row.role_assigned_by || null,
+        role_assigned_at: row.role_assigned_at || null,
+      });
+
+      const moderators = isSuper
+        ? await queryAll(
+            env,
+            `SELECT id, username_display, role, role_assigned_by, role_assigned_at
+               FROM user_accounts WHERE role = 'moderator'
+               ORDER BY role_assigned_at IS NULL, role_assigned_at DESC, username_normalized`
+          )
+        : await queryAll(
+            env,
+            `SELECT id, username_display, role, role_assigned_by, role_assigned_at
+               FROM user_accounts WHERE role = 'moderator' AND role_assigned_by = ?
+               ORDER BY role_assigned_at IS NULL, role_assigned_at DESC, username_normalized`,
+            [auth.user.id]
+          );
+
+      const response = {
+        success: true,
+        moderators: moderators.map(shape),
+        my_moderator_count: moderators.filter((r) => r.role_assigned_by === auth.user.id).length,
+        moderator_cap: isSuper ? null : 3,
+      };
+
+      if (isSuper) {
+        const admins = await queryAll(
+          env,
+          `SELECT id, username_display, role, role_assigned_by, role_assigned_at
+             FROM user_accounts WHERE role = 'admin'
+             ORDER BY role_assigned_at IS NULL, role_assigned_at DESC, username_normalized`
+        );
+        response.admins = admins.map(shape);
       }
 
-      return jsonResponse({ success: false, message: 'Invalid access token' }, 401);
+      return jsonResponse(response);
+    }
+
+    if (method === 'POST' && pathname === '/api/admin/roles/assign') {
+      const auth = await requireRole(request, env, 'admin');
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const targetId = String(body.target_user_id == null ? '' : body.target_user_id).trim();
+      const newRole = String(body.role == null ? '' : body.role).trim();
+      if (!targetId) {
+        return jsonResponse({ success: false, message: 'target_user_id is required.' }, 400);
+      }
+      if (newRole !== 'moderator' && newRole !== 'admin') {
+        return jsonResponse({ success: false, message: 'role must be "moderator" or "admin".' }, 400);
+      }
+
+      if (newRole === 'admin' && auth.user.role !== 'super_admin') {
+        return jsonResponse({ success: false, message: 'Only super admins can assign admins.' }, 403);
+      }
+
+      const target = await queryFirst(
+        env,
+        'SELECT id, role FROM user_accounts WHERE id = ?',
+        [targetId]
+      );
+      if (!target) {
+        return jsonResponse({ success: false, message: 'User not found.' }, 404);
+      }
+      if (target.id === auth.user.id) {
+        return jsonResponse({ success: false, message: 'You cannot change your own role.' }, 403);
+      }
+
+      const targetCurrent = target.role || 'user';
+      if (newRole === 'moderator') {
+        if (targetCurrent !== 'user') {
+          return jsonResponse({
+            success: false,
+            message: 'Target must currently be a regular user to become a moderator.',
+          }, 409);
+        }
+        if (auth.user.role === 'admin') {
+          const countRow = await queryFirst(
+            env,
+            `SELECT COUNT(*) AS c FROM user_accounts
+               WHERE role = 'moderator' AND role_assigned_by = ?`,
+            [auth.user.id]
+          );
+          if (Number(countRow?.c ?? 0) >= 3) {
+            return jsonResponse({
+              success: false,
+              message: 'You already manage 3 moderators. Remove one before assigning another.',
+            }, 409);
+          }
+        }
+      } else {
+        // newRole === 'admin'
+        if (targetCurrent !== 'user' && targetCurrent !== 'moderator') {
+          return jsonResponse({
+            success: false,
+            message: 'Only regular users or moderators can be promoted to admin.',
+          }, 409);
+        }
+      }
+
+      await execRun(
+        env,
+        `UPDATE user_accounts
+           SET role = ?, role_assigned_by = ?, role_assigned_at = datetime('now'),
+               updated_at = datetime('now')
+           WHERE id = ?`,
+        [newRole, auth.user.id, targetId]
+      );
+
+      return jsonResponse({ success: true, message: `Assigned ${newRole}.` });
+    }
+
+    if (method === 'POST' && pathname === '/api/admin/roles/remove') {
+      const auth = await requireRole(request, env, 'admin');
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const targetId = String(body.target_user_id == null ? '' : body.target_user_id).trim();
+      if (!targetId) {
+        return jsonResponse({ success: false, message: 'target_user_id is required.' }, 400);
+      }
+      const target = await queryFirst(
+        env,
+        'SELECT id, role, role_assigned_by FROM user_accounts WHERE id = ?',
+        [targetId]
+      );
+      if (!target) {
+        return jsonResponse({ success: false, message: 'User not found.' }, 404);
+      }
+      if (target.id === auth.user.id) {
+        return jsonResponse({ success: false, message: 'You cannot remove your own role.' }, 403);
+      }
+      const targetRole = target.role || 'user';
+      if (targetRole === 'user') {
+        return jsonResponse({ success: false, message: 'Target has no elevated role.' }, 409);
+      }
+      if (targetRole === 'super_admin') {
+        return jsonResponse({ success: false, message: 'Cannot demote a super admin.' }, 403);
+      }
+
+      if (auth.user.role === 'admin') {
+        if (targetRole !== 'moderator' || target.role_assigned_by !== auth.user.id) {
+          return jsonResponse({
+            success: false,
+            message: 'Admins can only remove moderators they assigned.',
+          }, 403);
+        }
+      }
+      // super_admin: any moderator or admin allowed (checked above)
+
+      await execRun(
+        env,
+        `UPDATE user_accounts
+           SET role = 'user', role_assigned_by = NULL, role_assigned_at = NULL,
+               updated_at = datetime('now')
+           WHERE id = ?`,
+        [targetId]
+      );
+
+      return jsonResponse({ success: true, message: 'Role removed.' });
+    }
+
+    if (method === 'POST' && pathname === '/api/oauth/authorize/validate') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const clientId = body.client_id != null ? String(body.client_id).trim() : '';
+      const redirectUri = body.redirect_uri != null ? String(body.redirect_uri).trim() : '';
+      const responseType = body.response_type != null ? String(body.response_type).trim() : '';
+      const rawScope = body.scope != null ? String(body.scope) : '';
+      if (responseType !== 'code') {
+        return jsonResponse({ success: false, message: 'Only response_type=code is supported.' }, 400);
+      }
+      if (!clientId) {
+        return jsonResponse({ success: false, message: 'client_id is required.' }, 400);
+      }
+      const client = await queryFirst(
+        env,
+        'SELECT * FROM oauth_clients WHERE client_id = ? AND is_active = 1',
+        [clientId]
+      );
+      if (!client) {
+        return jsonResponse({ success: false, message: 'Unknown OAuth client.' }, 404);
+      }
+      let allowedRedirectUris, allowedScopes;
+      try {
+        allowedRedirectUris = parseJsonArrayField(client.allowed_redirect_uris, 'allowed_redirect_uris');
+        allowedScopes = parseJsonArrayField(client.allowed_scopes, 'allowed_scopes');
+      } catch (error) {
+        return genericError('oauth_validate_client_config', error, 500, 'OAuth client is misconfigured.');
+      }
+      if (!validateRedirectUri(redirectUri, allowedRedirectUris)) {
+        return jsonResponse({
+          success: false,
+          message: 'redirect_uri does not match any registered URI for this client.',
+        }, 400);
+      }
+      let requested = parseScopeParam(rawScope);
+      if (requested.length === 0) requested = ['basic'];
+      const userHasWechat = Boolean(auth.user.wechat_id);
+      const scopes = classifyScopes(requested, allowedScopes, userHasWechat);
+      return jsonResponse({
+        success: true,
+        client: {
+          client_id: client.client_id,
+          display_name: client.display_name,
+          icon_url: client.icon_url || null,
+          allowed_domain: client.allowed_domain,
+        },
+        redirect_uri: redirectUri,
+        scopes,
+        user: { id: auth.user.id, username: auth.user.username_display },
+        user_has_wechat: userHasWechat,
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/oauth/authorize/grant') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const clientId = body.client_id != null ? String(body.client_id).trim() : '';
+      const redirectUri = body.redirect_uri != null ? String(body.redirect_uri).trim() : '';
+      const rawScope = body.scope != null ? String(body.scope) : '';
+      const state = body.state != null ? String(body.state) : '';
+      const approvedScopesInput = Array.isArray(body.approved_scopes) ? body.approved_scopes : [];
+      if (!clientId) {
+        return jsonResponse({ success: false, message: 'client_id is required.' }, 400);
+      }
+      const client = await queryFirst(
+        env,
+        'SELECT * FROM oauth_clients WHERE client_id = ? AND is_active = 1',
+        [clientId]
+      );
+      if (!client) {
+        return jsonResponse({ success: false, message: 'Unknown OAuth client.' }, 404);
+      }
+      let allowedRedirectUris, allowedScopes;
+      try {
+        allowedRedirectUris = parseJsonArrayField(client.allowed_redirect_uris, 'allowed_redirect_uris');
+        allowedScopes = parseJsonArrayField(client.allowed_scopes, 'allowed_scopes');
+      } catch (error) {
+        return genericError('oauth_grant_client_config', error, 500, 'OAuth client is misconfigured.');
+      }
+      if (!validateRedirectUri(redirectUri, allowedRedirectUris)) {
+        return jsonResponse({
+          success: false,
+          message: 'redirect_uri does not match any registered URI for this client.',
+        }, 400);
+      }
+      let requested = parseScopeParam(rawScope);
+      if (requested.length === 0) requested = ['basic'];
+      const userHasWechat = Boolean(auth.user.wechat_id);
+      const classification = classifyScopes(requested, allowedScopes, userHasWechat);
+      const approvedSet = new Set(approvedScopesInput.map((s) => String(s)));
+      const finalGranted = classification.valid.filter((s) => approvedSet.has(s));
+      if (finalGranted.length === 0) {
+        return jsonResponse({
+          success: true,
+          redirect_url: buildOAuthRedirect(redirectUri, { error: 'invalid_scope', state }),
+          granted_scopes: [],
+        });
+      }
+      const code = randomHex(32);
+      const codeHash = await sha256Hex(code);
+      const expiresAt = new Date(Date.now() + OAUTH_CODE_TTL_SECONDS * 1000).toISOString();
+      try {
+        await execRun(
+          env,
+          `
+            INSERT INTO oauth_authorization_codes
+              (code_hash, client_id, user_id, redirect_uri, granted_scopes, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+          `,
+          [codeHash, clientId, auth.user.id, redirectUri, JSON.stringify(finalGranted), expiresAt]
+        );
+      } catch (error) {
+        return genericError('oauth_grant_insert', error);
+      }
+      try {
+        await execRun(
+          env,
+          'DELETE FROM oauth_authorization_codes WHERE expires_at < ?',
+          [new Date(Date.now() - 60 * 60 * 1000).toISOString()]
+        );
+      } catch (error) {
+        logServerError('oauth_grant_cleanup', error);
+      }
+      return jsonResponse({
+        success: true,
+        redirect_url: buildOAuthRedirect(redirectUri, { code, state }),
+        granted_scopes: finalGranted,
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/oauth/authorize/deny') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const clientId = body.client_id != null ? String(body.client_id).trim() : '';
+      const redirectUri = body.redirect_uri != null ? String(body.redirect_uri).trim() : '';
+      const state = body.state != null ? String(body.state) : '';
+      if (!clientId) {
+        return jsonResponse({ success: false, message: 'client_id is required.' }, 400);
+      }
+      const client = await queryFirst(
+        env,
+        'SELECT * FROM oauth_clients WHERE client_id = ? AND is_active = 1',
+        [clientId]
+      );
+      if (!client) {
+        return jsonResponse({ success: false, message: 'Unknown OAuth client.' }, 404);
+      }
+      let allowedRedirectUris;
+      try {
+        allowedRedirectUris = parseJsonArrayField(client.allowed_redirect_uris, 'allowed_redirect_uris');
+      } catch (error) {
+        return genericError('oauth_deny_client_config', error, 500, 'OAuth client is misconfigured.');
+      }
+      if (!validateRedirectUri(redirectUri, allowedRedirectUris)) {
+        return jsonResponse({
+          success: false,
+          message: 'redirect_uri does not match any registered URI for this client.',
+        }, 400);
+      }
+      return jsonResponse({
+        success: true,
+        redirect_url: buildOAuthRedirect(redirectUri, { error: 'access_denied', state }),
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/oauth/token') {
+      const body = await parseJson(request);
+      const grantType = body.grant_type != null ? String(body.grant_type).trim() : '';
+      const clientId = body.client_id != null ? String(body.client_id).trim() : '';
+      const clientSecret = body.client_secret != null ? String(body.client_secret) : '';
+      const code = body.code != null ? String(body.code).trim() : '';
+      const redirectUri = body.redirect_uri != null ? String(body.redirect_uri).trim() : '';
+      if (grantType !== 'authorization_code') {
+        return jsonResponse({ success: false, message: 'Only grant_type=authorization_code is supported.' }, 400);
+      }
+      if (!clientId || !clientSecret || !code || !redirectUri) {
+        return jsonResponse({
+          success: false,
+          message: 'client_id, client_secret, code, and redirect_uri are required.',
+        }, 400);
+      }
+      const client = await queryFirst(
+        env,
+        'SELECT * FROM oauth_clients WHERE client_id = ? AND is_active = 1',
+        [clientId]
+      );
+      let presentedHmac;
+      try {
+        presentedHmac = await hmacSensitive(env, 'oauth_client_secret', clientSecret);
+      } catch (error) {
+        return genericError('oauth_token_hmac', error, 500, 'Server configuration error.');
+      }
+      if (!client) {
+        return jsonResponse({ success: false, message: 'Invalid client credentials.' }, 401);
+      }
+      const expectedHmac = String(client.client_secret_hmac || '');
+      const presentedBytes = new TextEncoder().encode(presentedHmac || '');
+      const expectedBytes = new TextEncoder().encode(expectedHmac);
+      if (!timingSafeEqual(presentedBytes, expectedBytes)) {
+        return jsonResponse({ success: false, message: 'Invalid client credentials.' }, 401);
+      }
+      const codeHash = await sha256Hex(code);
+      const row = await queryFirst(
+        env,
+        'SELECT * FROM oauth_authorization_codes WHERE code_hash = ?',
+        [codeHash]
+      );
+      if (!row) {
+        return jsonResponse({ success: false, message: 'Invalid authorization code.' }, 400);
+      }
+      if (row.client_id !== clientId) {
+        return jsonResponse({ success: false, message: 'Authorization code was not issued to this client.' }, 400);
+      }
+      if (row.redirect_uri !== redirectUri) {
+        return jsonResponse({ success: false, message: 'redirect_uri does not match the original authorize request.' }, 400);
+      }
+      if (row.consumed_at != null) {
+        // TODO: OAuth replay defense — invalidate all other unused codes for
+        // this (client_id, user_id) when a consumed code is presented again.
+        return jsonResponse({ success: false, message: 'Authorization code has already been used.' }, 400);
+      }
+      if (new Date(row.expires_at) <= new Date()) {
+        try {
+          await execRun(env, 'DELETE FROM oauth_authorization_codes WHERE code_hash = ?', [codeHash]);
+        } catch (error) {
+          logServerError('oauth_token_expired_cleanup', error);
+        }
+        return jsonResponse({ success: false, message: 'Authorization code has expired.' }, 400);
+      }
+      const consumeResult = await execRun(
+        env,
+        "UPDATE oauth_authorization_codes SET consumed_at = datetime('now') WHERE code_hash = ? AND consumed_at IS NULL",
+        [codeHash]
+      );
+      if (Number(consumeResult?.meta?.changes || 0) === 0) {
+        return jsonResponse({ success: false, message: 'Authorization code has already been used.' }, 400);
+      }
+      const user = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [row.user_id]);
+      if (!user) {
+        return jsonResponse({ success: false, message: 'User account no longer exists.' }, 410);
+      }
+      let grantedScopes;
+      try {
+        grantedScopes = parseJsonArrayField(row.granted_scopes, 'granted_scopes');
+      } catch (error) {
+        return genericError('oauth_token_scopes', error, 500, 'Stored grant is malformed.');
+      }
+      const response = {
+        success: true,
+        scope: grantedScopes.join(' '),
+        user: {
+          user_id: user.id,
+          username_display: user.username_display,
+        },
+      };
+      const wantsVerification = grantedScopes.includes('verification');
+      const wantsWechat = grantedScopes.includes('wechat');
+      let partial = false;
+      if ((wantsVerification || wantsWechat) && user.wechat_id) {
+        const accountRow = await queryFirst(
+          env,
+          `SELECT wechat_id, verified_status, verification_method, verification_time, reverified_at
+             FROM accounts WHERE wechat_id = ?`,
+          [user.wechat_id]
+        );
+        if (wantsVerification) {
+          if (accountRow) {
+            response.verification = {
+              verified_status: Number(accountRow.verified_status) === 1,
+              verification_method: accountRow.verification_method || null,
+              verification_time: accountRow.verification_time || null,
+              reverified_at: accountRow.reverified_at || null,
+            };
+          } else {
+            partial = true;
+          }
+        }
+        if (wantsWechat) {
+          response.wechat = { wechat_id: user.wechat_id };
+        }
+      } else if (wantsVerification || wantsWechat) {
+        partial = true;
+      }
+      if (partial) response.partial = true;
+      return jsonResponse(response);
     }
 
   return jsonResponse({ success: false, message: 'Route not found.' }, 404);

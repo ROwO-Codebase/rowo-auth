@@ -1,9 +1,50 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { ShieldAlert, Search, MoreVertical, X, AlertTriangle, ShieldOff, Save, ShieldCheck, Key, CheckCircle, Info, Plus, Edit2, Trash2, RotateCcw, Pencil, RefreshCw, Bell } from 'lucide-react';
+import { ShieldAlert, Search, MoreVertical, X, AlertTriangle, ShieldOff, Save, ShieldCheck, CheckCircle, Info, Plus, Edit2, Trash2, RotateCcw, Pencil, RefreshCw, Bell, Users, UserPlus, UserMinus, LogIn, ChevronLeft, ChevronRight } from 'lucide-react';
 import { format } from 'date-fns';
 import { clsx } from 'clsx';
 import ReactMarkdown from 'react-markdown';
+import { useSession } from '../contexts/SessionContext';
+import { authHeaders, hasMinRole, type RowoRole } from '../lib/session';
+
+const PAGE_SIZE = 50;
+
+function Pagination({ page, totalItems, onChange }: { page: number; totalItems: number; onChange: (page: number) => void }) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
+  const clampedPage = Math.min(Math.max(1, page), totalPages);
+  const start = totalItems === 0 ? 0 : (clampedPage - 1) * PAGE_SIZE + 1;
+  const end = Math.min(clampedPage * PAGE_SIZE, totalItems);
+  if (totalItems <= PAGE_SIZE) return null;
+  return (
+    <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-sm text-slate-600 gap-2">
+      <div className="text-xs sm:text-sm">
+        {totalItems === 0 ? 'No results' : `Showing ${start}-${end} of ${totalItems}`}
+      </div>
+      <div className="flex items-center gap-1 sm:gap-2">
+        <button
+          onClick={() => onChange(clampedPage - 1)}
+          disabled={clampedPage <= 1}
+          className="inline-flex items-center px-2 py-1 rounded-lg text-slate-600 hover:bg-white hover:text-indigo-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
+          aria-label="Previous page"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        <span className="px-2 text-xs sm:text-sm whitespace-nowrap">
+          Page {clampedPage} of {totalPages}
+        </span>
+        <button
+          onClick={() => onChange(clampedPage + 1)}
+          disabled={clampedPage >= totalPages}
+          className="inline-flex items-center px-2 py-1 rounded-lg text-slate-600 hover:bg-white hover:text-indigo-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
+          aria-label="Next page"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 interface AccountInfo {
   id: number;
@@ -44,53 +85,70 @@ interface AccountData {
 }
 
 export default function AdminPanel() {
+  const { user, loading: sessionLoading } = useSession();
   const [accounts, setAccounts] = useState<AccountData[]>([]);
+  const [accountsTotal, setAccountsTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedAccount, setSelectedAccount] = useState<AccountData | null>(null);
-  const [token, setToken] = useState(localStorage.getItem('admin_token') || '');
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [loginError, setLoginError] = useState('');
-  const [currentAdmin, setCurrentAdmin] = useState<{username: string, role: string} | null>(null);
-  const [confirmRotateOpen, setConfirmRotateOpen] = useState(false);
-  const [newTokenAlert, setNewTokenAlert] = useState<{isOpen: boolean, token: string}>({isOpen: false, token: ''});
   const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'accounts' | 'blacklist' | 'batch' | 'rowoUsers' | 'settings'>('accounts');
+  const [activeTab, setActiveTab] = useState<'accounts' | 'blacklist' | 'batch' | 'rowoUsers' | 'roles' | 'settings'>('accounts');
   const [blacklist, setBlacklist] = useState<any[]>([]);
   const [loadingBlacklist, setLoadingBlacklist] = useState(false);
+  const [accountsPage, setAccountsPage] = useState(1);
 
-  const fetchAccounts = async (isManual = false) => {
-    if (isManual) setRefreshing(true);
+  // Debounce the search box so each keystroke doesn't hit the API.
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearch(searchTerm.trim()), 300);
+    return () => clearTimeout(handle);
+  }, [searchTerm]);
+
+  // Searching effectively narrows the result set, so jump back to page 1.
+  useEffect(() => {
+    setAccountsPage(1);
+  }, [debouncedSearch]);
+
+  const role: RowoRole = (user?.role as RowoRole) || 'user';
+  const isAtLeastAdmin = hasMinRole(role, 'admin');
+  const isModeratorOnly = role === 'moderator';
+
+  const accountsFetchRef = useRef(0);
+  const fetchAccounts = async (opts: { isManual?: boolean; page?: number; q?: string } = {}) => {
+    const seq = ++accountsFetchRef.current;
+    if (opts.isManual) setRefreshing(true);
     else setLoading(true);
     try {
-      const res = await fetch(`${__API_ENDPOINT__}/api/admin/accounts`, {
-        headers: { Authorization: `Bearer ${token}` }
+      const params = new URLSearchParams({
+        page: String(opts.page ?? accountsPage),
+        page_size: String(PAGE_SIZE),
+      });
+      const q = opts.q ?? debouncedSearch;
+      if (q) params.set('q', q);
+      const res = await fetch(`${__API_ENDPOINT__}/api/admin/accounts?${params}`, {
+        headers: authHeaders(),
       });
       const data = await res.json();
+      if (accountsFetchRef.current !== seq) return; // stale response
       if (data.success) {
         setAccounts(data.accounts);
-        setCurrentAdmin(data.admin);
-        setIsAuthenticated(true);
-      } else {
-        setIsAuthenticated(false);
+        setAccountsTotal(Number(data.total ?? 0));
       }
     } catch {
-      setIsAuthenticated(false);
+      // ignore
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (accountsFetchRef.current === seq) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
-
-  useEffect(() => {
-    setLoading(false);
-  }, []);
 
   const fetchBlacklist = async () => {
     setLoadingBlacklist(true);
     try {
       const res = await fetch(`${__API_ENDPOINT__}/api/admin/blacklist`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: authHeaders(),
       });
       const data = await res.json();
       if (data.success) {
@@ -103,113 +161,73 @@ export default function AdminPanel() {
   };
 
   useEffect(() => {
-    if (isAuthenticated) {
-      if (activeTab === 'accounts') fetchAccounts();
-      else fetchBlacklist();
+    if (!user || role === 'user') return;
+    if (activeTab === 'accounts') {
+      fetchAccounts({ page: accountsPage, q: debouncedSearch });
+    } else if (activeTab === 'blacklist') {
+      fetchBlacklist();
     }
-  }, [activeTab, isAuthenticated]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, user?.id, role, accountsPage, debouncedSearch]);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setLoginError('');
-    try {
-      const res = await fetch(`${__API_ENDPOINT__}/api/admin/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token })
-      });
-      const data = await res.json();
-      if (data.success) {
-        localStorage.setItem('admin_token', token);
-        setIsAuthenticated(true);
-      } else {
-        setLoginError(data.message);
-        setLoading(false);
-      }
-    } catch (error) {
-      setLoginError('Login failed');
-      setLoading(false);
-    }
-  };
-
-  const handleRotateTokenClick = () => {
-    setConfirmRotateOpen(true);
-  };
-
-  const executeRotateToken = async () => {
-    setConfirmRotateOpen(false);
-    try {
-      const res = await fetch(`${__API_ENDPOINT__}/api/admin/rotate-token`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const data = await res.json();
-      if (data.success) {
-        setNewTokenAlert({isOpen: true, token: data.token});
-        setToken(data.token);
-        localStorage.setItem('admin_token', data.token);
-      }
-    } catch {
-    }
-  };
-
-  if (!isAuthenticated) {
+  if (sessionLoading) {
     return (
-      <div className="max-w-md mx-auto mt-20 bg-white p-8 rounded-3xl shadow-sm border border-slate-200">
-        <div className="text-center mb-8">
-          <div className="bg-indigo-100 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 text-indigo-600">
-            <Key className="w-8 h-8" />
-          </div>
-          <h1 className="text-2xl font-bold text-slate-900">Admin / Mod Access</h1>
-          <p className="text-slate-500 mt-2">Enter your access token to continue</p>
-        </div>
-        <form onSubmit={handleLogin} className="space-y-6">
-          <div>
-            <input
-              type="password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              className="block w-full px-4 py-3 rounded-xl border border-slate-300 shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors"
-              placeholder="Access Token"
-              required
-            />
-          </div>
-          {loginError && <p className="text-red-600 text-sm">{loginError}</p>}
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 transition-colors"
-          >
-            {loading ? 'Verifying...' : 'Access Panel'}
-          </button>
-        </form>
+      <div className="max-w-md mx-auto mt-20 text-center text-slate-500 text-sm">
+        Loading session...
       </div>
     );
   }
 
-  const filteredAccounts = accounts.filter(
-    (acc) =>
-      acc.wechat_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      acc.student_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      acc.student_id?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  if (!user) {
+    return (
+      <div className="max-w-md mx-auto mt-20 bg-white p-8 rounded-3xl shadow-sm border border-slate-200 text-center">
+        <div className="bg-indigo-100 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 text-indigo-600">
+          <LogIn className="w-8 h-8" />
+        </div>
+        <h1 className="text-2xl font-bold text-slate-900">Sign in required</h1>
+        <p className="text-slate-500 mt-2 mb-6">Sign in to your ROwO account to access the admin panel.</p>
+        <Link
+          to="/login"
+          className="inline-flex items-center gap-2 py-2.5 px-5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-xl transition-colors"
+        >
+          <LogIn className="w-4 h-4" /> Sign in
+        </Link>
+      </div>
+    );
+  }
+
+  if (role === 'user') {
+    return (
+      <div className="max-w-md mx-auto mt-20 bg-white p-8 rounded-3xl shadow-sm border border-slate-200 text-center">
+        <div className="bg-red-100 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 text-red-600">
+          <ShieldOff className="w-8 h-8" />
+        </div>
+        <h1 className="text-2xl font-bold text-slate-900">Access denied</h1>
+        <p className="text-slate-500 mt-2 mb-6">Your ROwO account does not have admin panel access.</p>
+        <Link
+          to="/center"
+          className="inline-flex items-center gap-2 py-2.5 px-5 bg-slate-900 hover:bg-black text-white text-sm font-medium rounded-xl transition-colors"
+        >
+          Back to User Center
+        </Link>
+      </div>
+    );
+  }
+
 
   return (
     <div className="max-w-5xl mx-auto">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">{currentAdmin?.role === 'moderator' ? 'Moderator Panel' : 'Admin Panel'}</h1>
+          <h1 className="text-2xl font-bold text-slate-900">{isModeratorOnly ? 'Moderator Panel' : 'Admin Panel'}</h1>
           <p className="text-sm text-slate-500 mt-1">
-            {currentAdmin?.role === 'moderator' ? 'Review pending manual verifications' : 'Manage verified student accounts and security'}
+            {isModeratorOnly ? 'Review pending manual verifications' : 'Manage verified student accounts and security'}
           </p>
         </div>
         <div className="flex items-center gap-4">
-          {currentAdmin && (
-            <div className="text-sm text-slate-600 font-medium hidden sm:block">
-              Logged in as <span className="text-indigo-600">{currentAdmin.username}</span> ({currentAdmin.role})
-            </div>
-          )}
+          <div className="text-sm text-slate-600 font-medium hidden sm:block">
+            Logged in as <span className="text-indigo-600">{user.username}</span> ({role.replace('_', ' ')})
+          </div>
         </div>
       </div>
 
@@ -224,28 +242,28 @@ export default function AdminPanel() {
           Accounts
           {activeTab === 'accounts' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
         </button>
-        {currentAdmin?.role === 'admin' && (
+        <button
+          onClick={() => setActiveTab('blacklist')}
+          className={clsx(
+            "px-4 py-2 text-sm font-medium transition-colors relative",
+            activeTab === 'blacklist' ? "text-indigo-600" : "text-slate-500 hover:text-slate-700"
+          )}
+        >
+          Blacklist Management
+          {activeTab === 'blacklist' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
+        </button>
+        <button
+          onClick={() => setActiveTab('batch')}
+          className={clsx(
+            "px-4 py-2 text-sm font-medium transition-colors relative",
+            activeTab === 'batch' ? "text-indigo-600" : "text-slate-500 hover:text-slate-700"
+          )}
+        >
+          Batch Operations
+          {activeTab === 'batch' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
+        </button>
+        {isAtLeastAdmin && (
           <>
-            <button
-              onClick={() => setActiveTab('blacklist')}
-              className={clsx(
-                "px-4 py-2 text-sm font-medium transition-colors relative",
-                activeTab === 'blacklist' ? "text-indigo-600" : "text-slate-500 hover:text-slate-700"
-              )}
-            >
-              Blacklist Management
-              {activeTab === 'blacklist' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
-            </button>
-            <button
-              onClick={() => setActiveTab('batch')}
-              className={clsx(
-                "px-4 py-2 text-sm font-medium transition-colors relative",
-                activeTab === 'batch' ? "text-indigo-600" : "text-slate-500 hover:text-slate-700"
-              )}
-            >
-              Batch Operations
-              {activeTab === 'batch' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
-            </button>
             <button
               onClick={() => setActiveTab('rowoUsers')}
               className={clsx(
@@ -255,6 +273,16 @@ export default function AdminPanel() {
             >
               ROwO Users
               {activeTab === 'rowoUsers' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
+            </button>
+            <button
+              onClick={() => setActiveTab('roles')}
+              className={clsx(
+                "px-4 py-2 text-sm font-medium transition-colors relative",
+                activeTab === 'roles' ? "text-indigo-600" : "text-slate-500 hover:text-slate-700"
+              )}
+            >
+              Roles
+              {activeTab === 'roles' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
             </button>
           </>
         )}
@@ -271,12 +299,14 @@ export default function AdminPanel() {
       </div>
 
       {activeTab === 'settings' ? (
-        <SettingsTab token={token} onRotateToken={handleRotateTokenClick} />
-      ) : activeTab === 'accounts' || currentAdmin?.role !== 'admin' ? (
+        <SettingsTab />
+      ) : activeTab === 'roles' && isAtLeastAdmin ? (
+        <RolesTab role={role} currentUserId={user.id} />
+      ) : activeTab === 'accounts' ? (
         <>
           <div className="flex items-center justify-end gap-2 mb-4">
             <button
-              onClick={() => fetchAccounts(true)}
+              onClick={() => fetchAccounts({ isManual: true })}
               disabled={loading || refreshing}
               className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-50"
               title="Refresh user list"
@@ -326,14 +356,14 @@ export default function AdminPanel() {
                         Loading accounts...
                       </td>
                     </tr>
-                  ) : filteredAccounts.length === 0 ? (
+                  ) : accounts.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="px-6 py-12 text-center text-sm text-slate-500">
                         No accounts found.
                       </td>
                     </tr>
                   ) : (
-                    filteredAccounts.map((account) => (
+                    accounts.map((account) => (
                       <tr key={account.wechat_id} className={clsx("hover:bg-slate-50 transition-colors", account.manual_status === 'pending' && "bg-amber-50/50")}>
                         <td className="px-6 py-4">
                           <div className="text-sm font-medium text-slate-900 flex flex-wrap items-center gap-2 break-all">
@@ -394,22 +424,26 @@ export default function AdminPanel() {
                 </tbody>
               </table>
             </div>
+            <Pagination
+              page={accountsPage}
+              totalItems={accountsTotal}
+              onChange={setAccountsPage}
+            />
           </div>
         </>
       ) : activeTab === 'blacklist' ? (
-        <BlacklistTab token={token} blacklist={blacklist} loading={loadingBlacklist} onUpdate={fetchBlacklist} />
-      ) : activeTab === 'rowoUsers' ? (
-        <RowoUsersTab token={token} />
+        <BlacklistTab blacklist={blacklist} loading={loadingBlacklist} onUpdate={fetchBlacklist} />
+      ) : activeTab === 'rowoUsers' && isAtLeastAdmin ? (
+        <RowoUsersTab />
       ) : (
-        <BatchTab token={token} onUpdate={fetchAccounts} />
+        <BatchTab onUpdate={fetchAccounts} />
       )}
 
       <AnimatePresence>
         {selectedAccount && (
           <AccountModal
             account={selectedAccount}
-            token={token}
-            role={currentAdmin?.role || 'admin'}
+            canManage={isAtLeastAdmin}
             onClose={() => setSelectedAccount(null)}
             onUpdate={() => {
               fetchAccounts();
@@ -418,39 +452,18 @@ export default function AdminPanel() {
           />
         )}
       </AnimatePresence>
-
-      <ConfirmDialog
-        isOpen={confirmRotateOpen}
-        title="Rotate Access Token"
-        message="Are you sure you want to rotate your access token? You will need to use the new token to log in next time."
-        onConfirm={executeRotateToken}
-        onCancel={() => setConfirmRotateOpen(false)}
-        confirmText="Rotate Token"
-        isDangerous={true}
-      />
-      <AlertDialog
-        isOpen={newTokenAlert.isOpen}
-        title="Token Rotated Successfully"
-        message={`Your new access token is:\n\n${newTokenAlert.token}\n\nPlease save it securely.`}
-        onClose={() => setNewTokenAlert({isOpen: false, token: ''})}
-        icon={CheckCircle}
-        iconColor="text-emerald-500"
-        iconBg="bg-emerald-100"
-      />
     </div>
   );
 }
 
 function AccountModal({
   account,
-  token,
-  role,
+  canManage,
   onClose,
   onUpdate,
 }: {
   account: AccountData;
-  token: string;
-  role: string;
+  canManage: boolean;
   onClose: () => void;
   onUpdate: () => void;
 }) {
@@ -471,7 +484,7 @@ function AccountModal({
     setLoadingInfo(true);
     try {
       const res = await fetch(`${__API_ENDPOINT__}/api/admin/accounts/${encodeURIComponent(account.wechat_id)}/info`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: authHeaders(),
       });
       const data = await res.json();
       if (data.success) {
@@ -490,19 +503,13 @@ function AccountModal({
       if (editingInfo.id) {
         await fetch(`${__API_ENDPOINT__}/api/admin/info/${editingInfo.id}`, {
           method: 'PUT',
-          headers: { 
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify(editingInfo),
         });
       } else {
         await fetch(`${__API_ENDPOINT__}/api/admin/accounts/${encodeURIComponent(account.wechat_id)}/info`, {
           method: 'POST',
-          headers: { 
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({
             ...editingInfo,
             color: editingInfo.color || 'blue',
@@ -531,7 +538,7 @@ function AccountModal({
     try {
       await fetch(`${__API_ENDPOINT__}/api/admin/info/${id}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: authHeaders(),
       });
       fetchInfo();
     } catch {
@@ -545,7 +552,7 @@ function AccountModal({
     try {
       await fetch(`${__API_ENDPOINT__}/api/admin/accounts/${encodeURIComponent(account.wechat_id)}/revoke`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: authHeaders(),
       });
       onUpdate();
     } catch {
@@ -558,7 +565,7 @@ function AccountModal({
     try {
       await fetch(`${__API_ENDPOINT__}/api/admin/accounts/${encodeURIComponent(account.wechat_id)}/unrevoke`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: authHeaders(),
       });
       onUpdate();
     } catch {
@@ -571,7 +578,7 @@ function AccountModal({
     try {
       await fetch(`${__API_ENDPOINT__}/api/admin/accounts/${encodeURIComponent(account.wechat_id)}/contact`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: authHeaders(),
       });
       await fetchInfo();
     } catch {
@@ -589,10 +596,7 @@ function AccountModal({
     try {
       await fetch(`${__API_ENDPOINT__}/api/admin/accounts/${encodeURIComponent(account.wechat_id)}/manual`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ action, reason: rejectReason }),
       });
       onUpdate();
@@ -757,7 +761,7 @@ function AccountModal({
           <div className="space-y-4">
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-medium text-slate-700">Information Items</h3>
-              {role === 'admin' && (
+              {canManage && (
                 <button
                   onClick={() => setEditingInfo({ color: 'blue', icon: 'info', visibility: 'public' })}
                   className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded transition-colors"
@@ -897,7 +901,7 @@ function AccountModal({
                           </span>
                         </div>
                         <div className="flex gap-1">
-                          {role === 'admin' && (
+                          {canManage && (
                             <>
                               <button onClick={() => setEditingInfo(info)} className="p-1 hover:bg-white/50 rounded text-slate-600">
                                 <Edit2 className="w-3 h-3" />
@@ -925,7 +929,7 @@ function AccountModal({
         </div>
 
         <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between gap-4">
-          {role === 'admin' && (
+          {canManage && (
             <div className="flex gap-2">
               {account.verified_status === 1 ? (
                 <button
@@ -948,8 +952,8 @@ function AccountModal({
               )}
             </div>
           )}
-          
-          <div className={`flex gap-3 ${role !== 'admin' ? 'w-full justify-end' : ''}`}>
+
+          <div className={`flex gap-3 ${!canManage ? 'w-full justify-end' : ''}`}>
             <button
               onClick={onClose}
               className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors"
@@ -979,7 +983,7 @@ function AccountModal({
   );
 }
 
-function BlacklistTab({ token, blacklist, loading, onUpdate }: { token: string; blacklist: any[]; loading: boolean; onUpdate: () => void }) {
+function BlacklistTab({ blacklist, loading, onUpdate }: { blacklist: any[]; loading: boolean; onUpdate: () => void }) {
   const [wechatId, setWechatId] = useState('');
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
@@ -994,10 +998,7 @@ function BlacklistTab({ token, blacklist, loading, onUpdate }: { token: string; 
     try {
       const res = await fetch(`${__API_ENDPOINT__}/api/admin/accounts/${encodeURIComponent(wechatId)}/blacklist`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ reason }),
       });
       const data = await res.json();
@@ -1020,7 +1021,7 @@ function BlacklistTab({ token, blacklist, loading, onUpdate }: { token: string; 
     try {
       const res = await fetch(`${__API_ENDPOINT__}/api/admin/accounts/${encodeURIComponent(id)}/unblacklist`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: authHeaders(),
       });
       const data = await res.json();
       if (data.success) {
@@ -1129,7 +1130,7 @@ function BlacklistTab({ token, blacklist, loading, onUpdate }: { token: string; 
   );
 }
 
-function BatchTab({ token, onUpdate }: { token: string; onUpdate: () => void }) {
+function BatchTab({ onUpdate }: { onUpdate: () => void }) {
   const [input, setInput] = useState('');
   const [reason, setReason] = useState('');
   const [action, setAction] = useState<'verify' | 'blacklist'>('verify');
@@ -1142,7 +1143,7 @@ function BatchTab({ token, onUpdate }: { token: string; onUpdate: () => void }) 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (wechatIds.length === 0 || !reason.trim()) return;
-    
+
     setConfirmOpen(true);
   };
 
@@ -1153,10 +1154,7 @@ function BatchTab({ token, onUpdate }: { token: string; onUpdate: () => void }) 
     try {
       const res = await fetch(`${__API_ENDPOINT__}/api/admin/batch/${action}`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ wechat_ids: wechatIds, reason }),
       });
       const data = await res.json();
@@ -1283,7 +1281,7 @@ function BatchTab({ token, onUpdate }: { token: string; onUpdate: () => void }) 
   );
 }
 
-function SettingsTab({ token, onRotateToken }: { token: string; onRotateToken: () => void }) {
+function SettingsTab() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [email, setEmail] = useState('');
@@ -1294,7 +1292,7 @@ function SettingsTab({ token, onRotateToken }: { token: string; onRotateToken: (
     const load = async () => {
       try {
         const res = await fetch(`${__API_ENDPOINT__}/api/admin/preferences`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: authHeaders(),
         });
         const data = await res.json();
         if (data.success) {
@@ -1307,7 +1305,7 @@ function SettingsTab({ token, onRotateToken }: { token: string; onRotateToken: (
       }
     };
     load();
-  }, [token]);
+  }, []);
 
   const trimmedEmail = email.trim();
   const cannotEnableWithoutEmail = enabled && trimmedEmail === '';
@@ -1320,10 +1318,7 @@ function SettingsTab({ token, onRotateToken }: { token: string; onRotateToken: (
     try {
       const res = await fetch(`${__API_ENDPOINT__}/api/admin/preferences`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           notification_email: trimmedEmail === '' ? null : trimmedEmail,
           manual_notification_enabled: enabled,
@@ -1423,28 +1418,6 @@ function SettingsTab({ token, onRotateToken }: { token: string; onRotateToken: (
           </form>
         )}
       </div>
-
-      <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
-        <div className="flex items-start gap-3 mb-4">
-          <div className="bg-red-100 p-2 rounded-lg text-red-600">
-            <Key className="w-5 h-5" />
-          </div>
-          <div>
-            <h2 className="text-lg font-semibold text-slate-900">Access token</h2>
-            <p className="text-sm text-slate-500 mt-0.5">
-              Rotating your token immediately invalidates the current one. You will need to sign in again with the new token.
-            </p>
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={onRotateToken}
-          className="flex items-center gap-2 py-2 px-4 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-xl shadow-sm transition-colors"
-        >
-          <AlertTriangle className="w-4 h-4" />
-          Rotate Token
-        </button>
-      </div>
     </div>
   );
 }
@@ -1543,47 +1516,61 @@ interface RowoUser {
   last_login_at: string | null;
   last_wechat_change_at: string | null;
   password_changed_at: string | null;
+  role: RowoRole;
 }
 
-function RowoUsersTab({ token }: { token: string }) {
+function RowoUsersTab() {
   const [users, setUsers] = useState<RowoUser[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [page, setPage] = useState(1);
   const [actionUser, setActionUser] = useState<RowoUser | null>(null);
   const [actionMode, setActionMode] = useState<'reset' | 'unbind' | null>(null);
   const [newPassword, setNewPassword] = useState('');
   const [actionStatus, setActionStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [actionMessage, setActionMessage] = useState('');
 
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(handle);
+  }, [search]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
+
+  const fetchSeq = useRef(0);
   const load = async () => {
+    const seq = ++fetchSeq.current;
     setLoading(true);
     try {
-      const res = await fetch(`${__API_ENDPOINT__}/api/admin/users`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const params = new URLSearchParams({
+        page: String(page),
+        page_size: String(PAGE_SIZE),
+      });
+      if (debouncedSearch) params.set('q', debouncedSearch);
+      const res = await fetch(`${__API_ENDPOINT__}/api/admin/users?${params}`, {
+        headers: authHeaders(),
       });
       const data = await res.json();
-      if (data.success) setUsers(data.users || []);
+      if (fetchSeq.current !== seq) return;
+      if (data.success) {
+        setUsers(data.users || []);
+        setTotal(Number(data.total ?? 0));
+      }
     } catch {
       // ignore
     } finally {
-      setLoading(false);
+      if (fetchSeq.current === seq) setLoading(false);
     }
   };
 
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const filtered = users.filter((u) => {
-    if (!search.trim()) return true;
-    const s = search.trim().toLowerCase();
-    return (
-      u.username.toLowerCase().includes(s) ||
-      (u.wechat_id || '').toLowerCase().includes(s) ||
-      u.id.toLowerCase().includes(s)
-    );
-  });
+  }, [page, debouncedSearch]);
 
   const closeAction = () => {
     setActionUser(null);
@@ -1602,7 +1589,7 @@ function RowoUsersTab({ token }: { token: string }) {
         `${__API_ENDPOINT__}/api/admin/users/${encodeURIComponent(actionUser.id)}/reset-password`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({ new_password: newPassword }),
         }
       );
@@ -1630,7 +1617,7 @@ function RowoUsersTab({ token }: { token: string }) {
         `${__API_ENDPOINT__}/api/admin/users/${encodeURIComponent(actionUser.id)}/unbind-wechat`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({}),
         }
       );
@@ -1681,6 +1668,7 @@ function RowoUsersTab({ token }: { token: string }) {
             <thead className="bg-slate-50">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Username</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Role</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">WeChat ID</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Created</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Last Login</th>
@@ -1690,13 +1678,14 @@ function RowoUsersTab({ token }: { token: string }) {
             </thead>
             <tbody className="bg-white divide-y divide-slate-200">
               {loading ? (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400 text-sm">Loading...</td></tr>
-              ) : filtered.length === 0 ? (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400 text-sm">No users.</td></tr>
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400 text-sm">Loading...</td></tr>
+              ) : users.length === 0 ? (
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400 text-sm">No users.</td></tr>
               ) : (
-                filtered.map((u) => (
+                users.map((u) => (
                   <tr key={u.id}>
                     <td className="px-4 py-3 text-sm font-medium text-slate-900">@{u.username}</td>
+                    <td className="px-4 py-3 text-sm"><RoleBadge role={u.role} /></td>
                     <td className="px-4 py-3 text-sm font-mono text-slate-600">{u.wechat_id || <span className="text-slate-400">—</span>}</td>
                     <td className="px-4 py-3 text-sm text-slate-500">{u.created_at ? format(new Date(u.created_at), 'yyyy-MM-dd') : '—'}</td>
                     <td className="px-4 py-3 text-sm text-slate-500">{u.last_login_at ? format(new Date(u.last_login_at), 'yyyy-MM-dd') : '—'}</td>
@@ -1723,6 +1712,7 @@ function RowoUsersTab({ token }: { token: string }) {
             </tbody>
           </table>
         </div>
+        <Pagination page={page} totalItems={total} onChange={setPage} />
       </div>
 
       <AnimatePresence>
@@ -1812,3 +1802,329 @@ function RowoUsersTab({ token }: { token: string }) {
     </div>
   );
 }
+
+const ROLE_LABEL: Record<RowoRole, string> = {
+  user: 'user',
+  moderator: 'moderator',
+  admin: 'admin',
+  super_admin: 'super admin',
+};
+
+const ROLE_BADGE_CLASS: Record<RowoRole, string> = {
+  user: 'bg-slate-100 text-slate-700',
+  moderator: 'bg-sky-100 text-sky-700',
+  admin: 'bg-indigo-100 text-indigo-700',
+  super_admin: 'bg-purple-100 text-purple-700',
+};
+
+function RoleBadge({ role }: { role: RowoRole }) {
+  return (
+    <span className={clsx('inline-flex items-center px-2 py-0.5 rounded text-xs font-medium', ROLE_BADGE_CLASS[role] || ROLE_BADGE_CLASS.user)}>
+      {ROLE_LABEL[role] || role}
+    </span>
+  );
+}
+
+interface RoleSearchResult {
+  id: string;
+  username: string;
+  role: RowoRole;
+  role_assigned_by: string | null;
+}
+
+interface RoleListEntry {
+  id: string;
+  username: string;
+  role: RowoRole;
+  role_assigned_by: string | null;
+  role_assigned_at: string | null;
+}
+
+function RolesTab({ role, currentUserId }: { role: RowoRole; currentUserId: string }) {
+  const isSuper = role === 'super_admin';
+  const [loading, setLoading] = useState(true);
+  const [moderators, setModerators] = useState<RoleListEntry[]>([]);
+  const [admins, setAdmins] = useState<RoleListEntry[]>([]);
+  const [myModCount, setMyModCount] = useState(0);
+  const [moderatorCap, setModeratorCap] = useState<number | null>(3);
+
+  const [search, setSearch] = useState('');
+  const [results, setResults] = useState<RoleSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`${__API_ENDPOINT__}/api/admin/roles/list`, {
+        headers: authHeaders(),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setModerators(data.moderators || []);
+        setAdmins(data.admins || []);
+        setMyModCount(data.my_moderator_count || 0);
+        setModeratorCap(data.moderator_cap ?? null);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const q = search.trim();
+    if (q.length === 0) {
+      setResults([]);
+      return;
+    }
+    setSearching(true);
+    const handle = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `${__API_ENDPOINT__}/api/admin/roles/search?q=${encodeURIComponent(q)}`,
+          { headers: authHeaders() }
+        );
+        const data = await res.json();
+        if (data.success) setResults(data.results || []);
+      } catch {
+        // ignore
+      } finally {
+        setSearching(false);
+      }
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [search]);
+
+  const assign = async (targetId: string, newRole: 'moderator' | 'admin') => {
+    setBusyId(targetId);
+    setMessage(null);
+    try {
+      const res = await fetch(`${__API_ENDPOINT__}/api/admin/roles/assign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ target_user_id: targetId, role: newRole }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setMessage({ kind: 'success', text: data.message || 'Assigned.' });
+        setSearch('');
+        setResults([]);
+        await load();
+      } else {
+        setMessage({ kind: 'error', text: data.message || 'Failed to assign.' });
+      }
+    } catch {
+      setMessage({ kind: 'error', text: 'Network error.' });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const remove = async (targetId: string) => {
+    setBusyId(targetId);
+    setMessage(null);
+    try {
+      const res = await fetch(`${__API_ENDPOINT__}/api/admin/roles/remove`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ target_user_id: targetId }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setMessage({ kind: 'success', text: data.message || 'Removed.' });
+        await load();
+      } else {
+        setMessage({ kind: 'error', text: data.message || 'Failed to remove.' });
+      }
+    } catch {
+      setMessage({ kind: 'error', text: 'Network error.' });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const canAssignAsMod = (r: RoleSearchResult) => {
+    if (r.id === currentUserId) return false;
+    if (r.role !== 'user') return false;
+    if (!isSuper && moderatorCap != null && myModCount >= moderatorCap) return false;
+    return true;
+  };
+  const canAssignAsAdmin = (r: RoleSearchResult) => {
+    if (!isSuper) return false;
+    if (r.id === currentUserId) return false;
+    return r.role === 'user' || r.role === 'moderator';
+  };
+  const canRemove = (entry: RoleListEntry) => {
+    if (entry.id === currentUserId) return false;
+    if (entry.role === 'super_admin') return false;
+    if (isSuper) return true;
+    // admin: can remove only the moderators they themselves assigned
+    return entry.role === 'moderator' && entry.role_assigned_by === currentUserId;
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+        <h3 className="text-lg font-bold text-slate-900 mb-2 flex items-center gap-2">
+          <UserPlus className="w-5 h-5 text-indigo-600" />
+          Assign a role
+        </h3>
+        <p className="text-sm text-slate-500 mb-4">
+          {isSuper
+            ? 'Search any ROwO user to promote them to moderator or admin.'
+            : `Search any ROwO user to promote them to moderator. You manage ${myModCount} / ${moderatorCap ?? 3} moderators.`}
+        </p>
+        <div className="relative mb-3">
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+            <Search className="h-4 w-4 text-slate-400" />
+          </div>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by ROwO username..."
+            className="block w-full pl-10 pr-3 py-2 border border-slate-300 rounded-lg bg-white placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+          />
+        </div>
+        {message && (
+          <div className={clsx(
+            'text-sm rounded-lg px-3 py-2 border mb-3',
+            message.kind === 'success'
+              ? 'text-emerald-700 bg-emerald-50 border-emerald-200'
+              : 'text-red-700 bg-red-50 border-red-200'
+          )}>
+            {message.text}
+          </div>
+        )}
+        {search.trim() && (
+          <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 overflow-hidden">
+            {searching ? (
+              <div className="px-4 py-3 text-sm text-slate-400">Searching...</div>
+            ) : results.length === 0 ? (
+              <div className="px-4 py-3 text-sm text-slate-400">No matches.</div>
+            ) : (
+              results.map((r) => (
+                <div key={r.id} className="px-4 py-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="text-sm font-medium text-slate-900 truncate">@{r.username}</span>
+                    <RoleBadge role={r.role} />
+                  </div>
+                  <div className="flex gap-2 shrink-0">
+                    <button
+                      onClick={() => assign(r.id, 'moderator')}
+                      disabled={busyId === r.id || !canAssignAsMod(r)}
+                      className="text-xs font-medium px-3 py-1.5 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Make moderator
+                    </button>
+                    {isSuper && (
+                      <button
+                        onClick={() => assign(r.id, 'admin')}
+                        disabled={busyId === r.id || !canAssignAsAdmin(r)}
+                        className="text-xs font-medium px-3 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Make admin
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+
+      <RolesList
+        title={isSuper ? 'All moderators' : 'Your moderators'}
+        subtitle={!isSuper ? `${myModCount} / ${moderatorCap ?? 3}` : undefined}
+        loading={loading}
+        entries={moderators}
+        canRemove={canRemove}
+        busyId={busyId}
+        onRemove={remove}
+      />
+
+      {isSuper && (
+        <RolesList
+          title="All admins"
+          loading={loading}
+          entries={admins}
+          canRemove={canRemove}
+          busyId={busyId}
+          onRemove={remove}
+        />
+      )}
+    </div>
+  );
+}
+
+function RolesList({
+  title,
+  subtitle,
+  loading,
+  entries,
+  canRemove,
+  busyId,
+  onRemove,
+}: {
+  title: string;
+  subtitle?: string;
+  loading: boolean;
+  entries: RoleListEntry[];
+  canRemove: (entry: RoleListEntry) => boolean;
+  busyId: string | null;
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+          <Users className="w-5 h-5 text-slate-500" />
+          {title}
+        </h3>
+        {subtitle && <span className="text-sm text-slate-500">{subtitle}</span>}
+      </div>
+      {loading ? (
+        <div className="text-sm text-slate-400 py-6 text-center">Loading...</div>
+      ) : entries.length === 0 ? (
+        <div className="text-sm text-slate-400 py-6 text-center border border-dashed border-slate-300 rounded-xl">
+          No entries.
+        </div>
+      ) : (
+        <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 overflow-hidden">
+          {entries.map((entry) => (
+            <div key={entry.id} className="px-4 py-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="text-sm font-medium text-slate-900 truncate">@{entry.username}</span>
+                <RoleBadge role={entry.role} />
+                {entry.role_assigned_at && (
+                  <span className="text-xs text-slate-400 hidden sm:inline">
+                    since {format(new Date(entry.role_assigned_at.endsWith('Z') ? entry.role_assigned_at : entry.role_assigned_at + 'Z'), 'MMM d, yyyy')}
+                  </span>
+                )}
+              </div>
+              {canRemove(entry) && (
+                <button
+                  onClick={() => onRemove(entry.id)}
+                  disabled={busyId === entry.id}
+                  className="text-xs font-medium px-3 py-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 transition-colors flex items-center gap-1 disabled:opacity-40"
+                >
+                  <UserMinus className="w-3 h-3" /> Remove
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
