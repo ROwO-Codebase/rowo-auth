@@ -1,12 +1,50 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { ShieldAlert, Search, MoreVertical, X, AlertTriangle, ShieldOff, Save, ShieldCheck, CheckCircle, Info, Plus, Edit2, Trash2, RotateCcw, Pencil, RefreshCw, Bell, Users, UserPlus, UserMinus, LogIn } from 'lucide-react';
+import { ShieldAlert, Search, MoreVertical, X, AlertTriangle, ShieldOff, Save, ShieldCheck, CheckCircle, Info, Plus, Edit2, Trash2, RotateCcw, Pencil, RefreshCw, Bell, Users, UserPlus, UserMinus, LogIn, ChevronLeft, ChevronRight } from 'lucide-react';
 import { format } from 'date-fns';
 import { clsx } from 'clsx';
 import ReactMarkdown from 'react-markdown';
 import { useSession } from '../contexts/SessionContext';
 import { authHeaders, hasMinRole, type RowoRole } from '../lib/session';
+
+const PAGE_SIZE = 50;
+
+function Pagination({ page, totalItems, onChange }: { page: number; totalItems: number; onChange: (page: number) => void }) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
+  const clampedPage = Math.min(Math.max(1, page), totalPages);
+  const start = totalItems === 0 ? 0 : (clampedPage - 1) * PAGE_SIZE + 1;
+  const end = Math.min(clampedPage * PAGE_SIZE, totalItems);
+  if (totalItems <= PAGE_SIZE) return null;
+  return (
+    <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-sm text-slate-600 gap-2">
+      <div className="text-xs sm:text-sm">
+        {totalItems === 0 ? 'No results' : `Showing ${start}-${end} of ${totalItems}`}
+      </div>
+      <div className="flex items-center gap-1 sm:gap-2">
+        <button
+          onClick={() => onChange(clampedPage - 1)}
+          disabled={clampedPage <= 1}
+          className="inline-flex items-center px-2 py-1 rounded-lg text-slate-600 hover:bg-white hover:text-indigo-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
+          aria-label="Previous page"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        <span className="px-2 text-xs sm:text-sm whitespace-nowrap">
+          Page {clampedPage} of {totalPages}
+        </span>
+        <button
+          onClick={() => onChange(clampedPage + 1)}
+          disabled={clampedPage >= totalPages}
+          className="inline-flex items-center px-2 py-1 rounded-lg text-slate-600 hover:bg-white hover:text-indigo-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
+          aria-label="Next page"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 interface AccountInfo {
   id: number;
@@ -56,6 +94,11 @@ export default function AdminPanel() {
   const [activeTab, setActiveTab] = useState<'accounts' | 'blacklist' | 'batch' | 'rowoUsers' | 'roles' | 'settings'>('accounts');
   const [blacklist, setBlacklist] = useState<any[]>([]);
   const [loadingBlacklist, setLoadingBlacklist] = useState(false);
+  const [accountsPage, setAccountsPage] = useState(1);
+
+  useEffect(() => {
+    setAccountsPage(1);
+  }, [searchTerm]);
 
   const role: RowoRole = (user?.role as RowoRole) || 'user';
   const isAtLeastAdmin = hasMinRole(role, 'admin');
@@ -152,6 +195,10 @@ export default function AdminPanel() {
       acc.wechat_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
       acc.student_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       acc.student_id?.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+  const pagedAccounts = filteredAccounts.slice(
+    (accountsPage - 1) * PAGE_SIZE,
+    accountsPage * PAGE_SIZE
   );
 
   return (
@@ -295,14 +342,14 @@ export default function AdminPanel() {
                         Loading accounts...
                       </td>
                     </tr>
-                  ) : filteredAccounts.length === 0 ? (
+                  ) : pagedAccounts.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="px-6 py-12 text-center text-sm text-slate-500">
                         No accounts found.
                       </td>
                     </tr>
                   ) : (
-                    filteredAccounts.map((account) => (
+                    pagedAccounts.map((account) => (
                       <tr key={account.wechat_id} className={clsx("hover:bg-slate-50 transition-colors", account.manual_status === 'pending' && "bg-amber-50/50")}>
                         <td className="px-6 py-4">
                           <div className="text-sm font-medium text-slate-900 flex flex-wrap items-center gap-2 break-all">
@@ -363,6 +410,11 @@ export default function AdminPanel() {
                 </tbody>
               </table>
             </div>
+            <Pagination
+              page={accountsPage}
+              totalItems={filteredAccounts.length}
+              onChange={setAccountsPage}
+            />
           </div>
         </>
       ) : activeTab === 'blacklist' ? (
@@ -1457,11 +1509,16 @@ function RowoUsersTab() {
   const [users, setUsers] = useState<RowoUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
   const [actionUser, setActionUser] = useState<RowoUser | null>(null);
   const [actionMode, setActionMode] = useState<'reset' | 'unbind' | null>(null);
   const [newPassword, setNewPassword] = useState('');
   const [actionStatus, setActionStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [actionMessage, setActionMessage] = useState('');
+
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
 
   const load = async () => {
     setLoading(true);
@@ -1492,6 +1549,7 @@ function RowoUsersTab() {
       u.id.toLowerCase().includes(s)
     );
   });
+  const pagedUsers = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const closeAction = () => {
     setActionUser(null);
@@ -1600,10 +1658,10 @@ function RowoUsersTab() {
             <tbody className="bg-white divide-y divide-slate-200">
               {loading ? (
                 <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400 text-sm">Loading...</td></tr>
-              ) : filtered.length === 0 ? (
+              ) : pagedUsers.length === 0 ? (
                 <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400 text-sm">No users.</td></tr>
               ) : (
-                filtered.map((u) => (
+                pagedUsers.map((u) => (
                   <tr key={u.id}>
                     <td className="px-4 py-3 text-sm font-medium text-slate-900">@{u.username}</td>
                     <td className="px-4 py-3 text-sm"><RoleBadge role={u.role} /></td>
@@ -1633,6 +1691,7 @@ function RowoUsersTab() {
             </tbody>
           </table>
         </div>
+        <Pagination page={page} totalItems={filtered.length} onChange={setPage} />
       </div>
 
       <AnimatePresence>
