@@ -1120,6 +1120,33 @@ async function handleRequest(request, env, ctx) {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
         if (method === 'ADFS') {
+          const reverifyStudentIdConflict = studentIdHashes.v2
+            ? await queryFirst(env, 'SELECT wechat_id, student_id FROM accounts WHERE wechat_id != ? AND student_id IN (?, ?) LIMIT 1', [wechat_id, studentIdHashes.v1, studentIdHashes.v2])
+            : null;
+          if (reverifyStudentIdConflict) {
+            if (reverifyStudentIdConflict.student_id === studentIdHashes.v1) {
+              await lazyUpgradeAccountColumn(env, 'student_id', reverifyStudentIdConflict.wechat_id, studentIdHashes.v2);
+            }
+            return jsonResponse({ success: false, message: 'This student ID is already linked to another account.' }, 400);
+          }
+          const reverifyStudentNameConflict = studentNameHashes.v2
+            ? await queryFirst(env, 'SELECT wechat_id, student_name FROM accounts WHERE wechat_id != ? AND student_name IN (?, ?) LIMIT 1', [wechat_id, studentNameHashes.v1, studentNameHashes.v2])
+            : null;
+          if (reverifyStudentNameConflict) {
+            if (reverifyStudentNameConflict.student_name === studentNameHashes.v1) {
+              await lazyUpgradeAccountColumn(env, 'student_name', reverifyStudentNameConflict.wechat_id, studentNameHashes.v2);
+            }
+            return jsonResponse({ success: false, message: 'This name is already linked to another account.' }, 400);
+          }
+          const reverifyEmailConflict = emailHashes.v2
+            ? await queryFirst(env, 'SELECT wechat_id, email FROM accounts WHERE wechat_id != ? AND email IN (?, ?) LIMIT 1', [wechat_id, emailHashes.v1, emailHashes.v2])
+            : null;
+          if (reverifyEmailConflict) {
+            if (reverifyEmailConflict.email === emailHashes.v1) {
+              await lazyUpgradeAccountColumn(env, 'email', reverifyEmailConflict.wechat_id, emailHashes.v2);
+            }
+            return jsonResponse({ success: false, message: 'This email is already linked to another account.' }, 400);
+          }
           await execRun(
             env,
             "UPDATE accounts SET reverified_at = datetime('now'), student_id = ?, student_name = ?, email = ? WHERE wechat_id = ?",
@@ -1370,11 +1397,21 @@ async function handleRequest(request, env, ctx) {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
         if (method === 'Email') {
-          const reverifyEmailV2 = await hmacSensitive(env, 'email', normalizedEmail);
+          const reverifyEmailDual = await dualHashSensitive(env, 'email', normalizedEmail);
+          const reverifyEmailConflict = reverifyEmailDual.v2
+            ? await queryFirst(env, 'SELECT wechat_id, email FROM accounts WHERE wechat_id != ? AND email IN (?, ?) LIMIT 1', [wechat_id, reverifyEmailDual.v1, reverifyEmailDual.v2])
+            : null;
+          if (reverifyEmailConflict) {
+            if (reverifyEmailConflict.email === reverifyEmailDual.v1) {
+              await lazyUpgradeAccountColumn(env, 'email', reverifyEmailConflict.wechat_id, reverifyEmailDual.v2);
+            }
+            await execRun(env, 'DELETE FROM email_verification_codes WHERE wechat_id = ? AND email = ?', [wechat_id, normalizedEmail]);
+            return jsonResponse({ success: false, message: 'This email is already linked to another account.' }, 409);
+          }
           await execRun(
             env,
             "UPDATE accounts SET reverified_at = datetime('now'), email = ? WHERE wechat_id = ?",
-            [reverifyEmailV2, wechat_id]
+            [reverifyEmailDual.v2, wechat_id]
           );
           const { token, expiresAt } = await createRenameToken(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
@@ -1574,6 +1611,15 @@ async function handleRequest(request, env, ctx) {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
         if (method === 'Discord') {
+          const reverifyDiscordConflict = discordIdHashes.v2
+            ? await queryFirst(env, 'SELECT wechat_id, discord_id FROM accounts WHERE wechat_id != ? AND discord_id IN (?, ?) AND verified_status = 1 LIMIT 1', [wechat_id, discordIdHashes.v1, discordIdHashes.v2])
+            : null;
+          if (reverifyDiscordConflict) {
+            if (reverifyDiscordConflict.discord_id === discordIdHashes.v1) {
+              await lazyUpgradeAccountColumn(env, 'discord_id', reverifyDiscordConflict.wechat_id, discordIdHashes.v2);
+            }
+            return jsonResponse({ success: false, message: 'This Discord account is already connected to another WeChat ID.' }, 409);
+          }
           await execRun(
             env,
             "UPDATE accounts SET reverified_at = datetime('now'), discord_id = ? WHERE wechat_id = ?",
@@ -1768,6 +1814,15 @@ async function handleRequest(request, env, ctx) {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
         if (method === 'GitHub') {
+          const reverifyGithubConflict = githubIdHashes.v2
+            ? await queryFirst(env, 'SELECT wechat_id, github_id FROM accounts WHERE wechat_id != ? AND github_id IN (?, ?) AND verified_status = 1 LIMIT 1', [wechat_id, githubIdHashes.v1, githubIdHashes.v2])
+            : null;
+          if (reverifyGithubConflict) {
+            if (reverifyGithubConflict.github_id === githubIdHashes.v1) {
+              await lazyUpgradeAccountColumn(env, 'github_id', reverifyGithubConflict.wechat_id, githubIdHashes.v2);
+            }
+            return jsonResponse({ success: false, message: 'This GitHub account is already connected to another WeChat ID.' }, 409);
+          }
           await execRun(
             env,
             "UPDATE accounts SET reverified_at = datetime('now'), github_id = ? WHERE wechat_id = ?",

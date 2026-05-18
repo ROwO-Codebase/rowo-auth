@@ -164,7 +164,10 @@ export default function RenamePage() {
             </form>
 
             <div className="w-full pt-4 border-t border-slate-100">
-              <p className="text-xs text-slate-400 mb-3">Don't want to change your ID? Invalidate this token to keep your current ID.</p>
+              <p className="text-xs text-slate-400 mb-3 leading-relaxed">
+                Don't want to change your ID? Invalidate this token to keep your current ID.
+                {' '}If you re-verified only to upgrade your account's hash to HMAC-SHA-256, that upgrade has already been applied — you can safely invalidate this token.
+              </p>
               <button
                 onClick={handleInvalidate}
                 className="w-full py-2 px-4 bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 font-medium rounded-xl transition-colors flex items-center justify-center gap-2"
