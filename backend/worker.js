@@ -178,7 +178,12 @@ async function verifyAdfsCreateCodeJwt(env, authHeader) {
 // See plans/add-a-rowo-account-humming-anchor.md.
 // ----------------------------------------------------------------------------
 
-const PBKDF2_ITERATIONS = 310_000;
+// Cloudflare Workers caps PBKDF2 iterations at 100_000 in Web Crypto. NIST baseline is
+// 10k; OWASP 2023 guidance is 600k+. We sit at the Workers ceiling; if the limit is
+// raised, bump this constant — old hashes still verify because the iteration count is
+// embedded in the stored format. To strengthen further within the cap, consider WASM
+// argon2/bcrypt as a follow-up.
+const PBKDF2_ITERATIONS = 100_000;
 const PBKDF2_SALT_BYTES = 16;
 const PBKDF2_HASH_BYTES = 32;
 const USER_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -189,7 +194,8 @@ const RESERVED_USERNAMES = new Set([
 ]);
 // Placeholder hash used to keep timing flat when a username does not exist.
 // Verify against this on user-miss; PBKDF2 work is identical to the real path.
-const DUMMY_PASSWORD_HASH = 'v1:pbkdf2-sha256:310000:AAAAAAAAAAAAAAAAAAAAAA==:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+// Iteration count here MUST match PBKDF2_ITERATIONS or verifyPassword will throw.
+const DUMMY_PASSWORD_HASH = 'v1:pbkdf2-sha256:100000:AAAAAAAAAAAAAAAAAAAAAA==:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 function bytesToBase64(bytes) {
   const bin = Array.from(bytes, (b) => String.fromCodePoint(b)).join('');
