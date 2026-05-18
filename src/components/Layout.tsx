@@ -82,6 +82,16 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                   </button>
                   {menuOpen && (
                     <div className="absolute right-0 mt-2 w-44 bg-white border border-slate-200 rounded-xl shadow-lg overflow-hidden">
+                      {user.role !== 'user' && (
+                        <Link
+                          to="/admin"
+                          onClick={() => setMenuOpen(false)}
+                          className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border-b border-slate-100"
+                        >
+                          <ShieldAlert className="w-3.5 h-3.5" />
+                          Admin Panel
+                        </Link>
+                      )}
                       <Link
                         to="/center"
                         onClick={() => setMenuOpen(false)}

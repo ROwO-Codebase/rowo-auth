@@ -466,6 +466,7 @@ function publicUserShape(user) {
     last_login_at: user.last_login_at || null,
     last_wechat_change_at: user.last_wechat_change_at || null,
     password_changed_at: user.password_changed_at || null,
+    role: user.role || 'user',
   };
 }
 
@@ -1093,10 +1094,11 @@ async function notifyAdminsOfManualVerification(env, wechatId, reason) {
       env,
       `
         SELECT notification_email
-        FROM admins
+        FROM user_accounts
         WHERE manual_notification_enabled = 1
           AND notification_email IS NOT NULL
           AND TRIM(notification_email) != ''
+          AND role IN ('moderator','admin','super_admin')
       `
     );
   } catch (error) {
@@ -1138,31 +1140,32 @@ async function notifyAdminsOfManualVerification(env, wechatId, reason) {
   }
 }
 
-async function requireAuth(request, env) {
-  const authHeader = request.headers.get('authorization') || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+const ROLE_RANK = { user: 0, moderator: 1, admin: 2, super_admin: 3 };
 
-  if (!token) {
-    return { response: jsonResponse({ success: false, message: 'Unauthorized' }, 401) };
-  }
-
-  const admin = await queryFirst(env, 'SELECT * FROM admins WHERE access_token = ?', [token]);
-  if (!admin) {
-    return { response: jsonResponse({ success: false, message: 'Invalid token' }, 401) };
-  }
-
-  return { admin };
+function rolesAtLeast(role, minRole) {
+  return (ROLE_RANK[role] ?? -1) >= (ROLE_RANK[minRole] ?? Infinity);
 }
 
-async function requireAdmin(request, env) {
-  const auth = await requireAuth(request, env);
-  if (auth.response) {
-    return auth;
+// Shapes a user_accounts row into the `auth.admin` object the legacy admin
+// endpoints expect (username, id, role, notification_email, ...). This lets
+// us delete the `admins` table without rewriting every endpoint body.
+function userToAdminShape(user) {
+  return {
+    id: user.id,
+    username: user.username_display,
+    role: user.role,
+    notification_email: user.notification_email || null,
+    manual_notification_enabled: Number(user.manual_notification_enabled || 0),
+  };
+}
+
+async function requireRole(request, env, minRole) {
+  const auth = await requireUserAuth(request, env);
+  if (auth.response) return auth;
+  if (!rolesAtLeast(auth.user.role, minRole)) {
+    return { response: jsonResponse({ success: false, message: 'Forbidden' }, 403) };
   }
-  if (auth.admin.role !== 'admin') {
-    return { response: jsonResponse({ success: false, message: 'Forbidden: Admins only' }, 403) };
-  }
-  return auth;
+  return { user: auth.user, admin: userToAdminShape(auth.user) };
 }
 
 function resolveAllowedOrigin(request, env) {
@@ -2665,7 +2668,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'GET' && pathname === '/api/admin/stats') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const verifiedRow = await queryFirst(env, 'SELECT COUNT(*) as count FROM accounts WHERE verified_status = 1');
@@ -2678,7 +2681,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'GET' && pathname === '/api/admin/accounts') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       let accounts;
@@ -2712,7 +2715,7 @@ async function handleRequest(request, env, ctx) {
 
     const adminInfoMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/info$/);
     if (method === 'GET' && adminInfoMatch) {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(adminInfoMatch[1]);
@@ -2725,7 +2728,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'POST' && adminInfoMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(adminInfoMatch[1]);
@@ -2746,7 +2749,7 @@ async function handleRequest(request, env, ctx) {
 
     const adminEditInfoMatch = pathname.match(/^\/api\/admin\/info\/([^/]+)$/);
     if (method === 'PUT' && adminEditInfoMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
 
       const id = decodeURIComponent(adminEditInfoMatch[1]);
@@ -2767,7 +2770,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'DELETE' && adminEditInfoMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
 
       const id = decodeURIComponent(adminEditInfoMatch[1]);
@@ -2777,7 +2780,7 @@ async function handleRequest(request, env, ctx) {
 
     const revokeMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/(revoke|unrevoke)$/);
     if (method === 'POST' && revokeMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(revokeMatch[1]);
@@ -2794,7 +2797,7 @@ async function handleRequest(request, env, ctx) {
 
     const manualMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/manual$/);
     if (method === 'POST' && manualMatch) {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(manualMatch[1]);
@@ -2848,7 +2851,7 @@ async function handleRequest(request, env, ctx) {
 
     const contactMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/contact$/);
     if (method === 'POST' && contactMatch) {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(contactMatch[1]);
@@ -2883,7 +2886,7 @@ async function handleRequest(request, env, ctx) {
 
     const blacklistMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/blacklist$/);
     if (method === 'POST' && blacklistMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(blacklistMatch[1]);
@@ -2935,7 +2938,7 @@ async function handleRequest(request, env, ctx) {
 
     const unblacklistMatch = pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/unblacklist$/);
     if (method === 'POST' && unblacklistMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const wechatId = decodeURIComponent(unblacklistMatch[1]);
@@ -2990,7 +2993,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'POST' && pathname === '/api/admin/batch/verify') {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const body = await parseJson(request);
@@ -3068,7 +3071,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'POST' && pathname === '/api/admin/batch/blacklist') {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const body = await parseJson(request);
@@ -3134,7 +3137,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'GET' && pathname === '/api/admin/blacklist') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const blacklist = await queryAll(
@@ -3150,23 +3153,14 @@ async function handleRequest(request, env, ctx) {
       return jsonResponse({ success: true, blacklist });
     }
 
-    if (method === 'POST' && pathname === '/api/admin/rotate-token') {
-      const auth = await requireAuth(request, env);
-      if (auth.response) return auth.response;
-
-      const newToken = `${crypto.randomUUID()}${Date.now().toString(36)}`;
-      await execRun(env, 'UPDATE admins SET access_token = ? WHERE id = ?', [newToken, auth.admin.id]);
-      return jsonResponse({ success: true, token: newToken });
-    }
-
     if (method === 'GET' && pathname === '/api/admin/users') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
       const rows = await queryAll(
         env,
         `
           SELECT id, username_display, wechat_id, created_at, last_login_at,
-                 last_wechat_change_at, password_changed_at
+                 last_wechat_change_at, password_changed_at, role
           FROM user_accounts
           ORDER BY created_at DESC
           LIMIT 500
@@ -3182,13 +3176,14 @@ async function handleRequest(request, env, ctx) {
           last_login_at: row.last_login_at || null,
           last_wechat_change_at: row.last_wechat_change_at || null,
           password_changed_at: row.password_changed_at || null,
+          role: row.role || 'user',
         })),
       });
     }
 
     const userResetMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/reset-password$/);
     if (method === 'POST' && userResetMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
       const id = decodeURIComponent(userResetMatch[1]);
       const body = await parseJson(request);
@@ -3196,9 +3191,18 @@ async function handleRequest(request, env, ctx) {
       if (!passwordCheck.ok) {
         return jsonResponse({ success: false, message: passwordCheck.message }, 400);
       }
-      const target = await queryFirst(env, 'SELECT id FROM user_accounts WHERE id = ?', [id]);
+      const target = await queryFirst(env, 'SELECT id, role FROM user_accounts WHERE id = ?', [id]);
       if (!target) {
         return jsonResponse({ success: false, message: 'User not found.' }, 404);
+      }
+      // Strict hierarchy: actor must rank strictly above target.
+      const actorRank = ROLE_RANK[auth.user.role] ?? -1;
+      const targetRank = ROLE_RANK[target.role] ?? 0;
+      if (actorRank <= targetRank) {
+        return jsonResponse({
+          success: false,
+          message: 'You cannot reset the password of a user at your level or above.',
+        }, 403);
       }
       const newHash = await hashPassword(String(body.new_password));
       await execRun(
@@ -3215,7 +3219,7 @@ async function handleRequest(request, env, ctx) {
 
     const userUnbindMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/unbind-wechat$/);
     if (method === 'POST' && userUnbindMatch) {
-      const auth = await requireAdmin(request, env);
+      const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
       const id = decodeURIComponent(userUnbindMatch[1]);
       const target = await queryFirst(env, 'SELECT id FROM user_accounts WHERE id = ?', [id]);
@@ -3231,12 +3235,12 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'GET' && pathname === '/api/admin/preferences') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const row = await queryFirst(
         env,
-        'SELECT notification_email, manual_notification_enabled FROM admins WHERE id = ?',
+        'SELECT notification_email, manual_notification_enabled FROM user_accounts WHERE id = ?',
         [auth.admin.id]
       );
       return jsonResponse({
@@ -3247,7 +3251,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'POST' && pathname === '/api/admin/preferences') {
-      const auth = await requireAuth(request, env);
+      const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
       const body = await parseJson(request);
@@ -3296,7 +3300,7 @@ async function handleRequest(request, env, ctx) {
       }
       if (updates.length > 0) {
         params.push(auth.admin.id);
-        await execRun(env, `UPDATE admins SET ${updates.join(', ')} WHERE id = ?`, params);
+        await execRun(env, `UPDATE user_accounts SET ${updates.join(', ')}, updated_at = datetime('now') WHERE id = ?`, params);
       }
 
       return jsonResponse({
@@ -3306,16 +3310,204 @@ async function handleRequest(request, env, ctx) {
       });
     }
 
-    if (method === 'POST' && pathname === '/api/admin/login') {
-      const body = await parseJson(request);
-      const { token } = body;
-      const admin = await queryFirst(env, 'SELECT * FROM admins WHERE access_token = ?', [token]);
+    if (method === 'GET' && pathname === '/api/admin/roles/search') {
+      const auth = await requireRole(request, env, 'admin');
+      if (auth.response) return auth.response;
+      const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
+      if (q.length < 1) {
+        return jsonResponse({ success: true, results: [] });
+      }
+      const like = `%${q.replace(/[%_]/g, (m) => `\\${m}`)}%`;
+      const rows = await queryAll(
+        env,
+        `
+          SELECT id, username_display, role, role_assigned_by
+          FROM user_accounts
+          WHERE LOWER(username_normalized) LIKE ? ESCAPE '\\'
+          ORDER BY username_normalized
+          LIMIT 20
+        `,
+        [like]
+      );
+      return jsonResponse({
+        success: true,
+        results: rows.map((row) => ({
+          id: row.id,
+          username: row.username_display,
+          role: row.role || 'user',
+          role_assigned_by: row.role_assigned_by || null,
+        })),
+      });
+    }
 
-      if (admin) {
-        return jsonResponse({ success: true, role: admin.role });
+    if (method === 'GET' && pathname === '/api/admin/roles/list') {
+      const auth = await requireRole(request, env, 'admin');
+      if (auth.response) return auth.response;
+      const isSuper = auth.user.role === 'super_admin';
+
+      const shape = (row) => ({
+        id: row.id,
+        username: row.username_display,
+        role: row.role,
+        role_assigned_by: row.role_assigned_by || null,
+        role_assigned_at: row.role_assigned_at || null,
+      });
+
+      const moderators = isSuper
+        ? await queryAll(
+            env,
+            `SELECT id, username_display, role, role_assigned_by, role_assigned_at
+               FROM user_accounts WHERE role = 'moderator'
+               ORDER BY role_assigned_at IS NULL, role_assigned_at DESC, username_normalized`
+          )
+        : await queryAll(
+            env,
+            `SELECT id, username_display, role, role_assigned_by, role_assigned_at
+               FROM user_accounts WHERE role = 'moderator' AND role_assigned_by = ?
+               ORDER BY role_assigned_at IS NULL, role_assigned_at DESC, username_normalized`,
+            [auth.user.id]
+          );
+
+      const response = {
+        success: true,
+        moderators: moderators.map(shape),
+        my_moderator_count: moderators.filter((r) => r.role_assigned_by === auth.user.id).length,
+        moderator_cap: isSuper ? null : 3,
+      };
+
+      if (isSuper) {
+        const admins = await queryAll(
+          env,
+          `SELECT id, username_display, role, role_assigned_by, role_assigned_at
+             FROM user_accounts WHERE role = 'admin'
+             ORDER BY role_assigned_at IS NULL, role_assigned_at DESC, username_normalized`
+        );
+        response.admins = admins.map(shape);
       }
 
-      return jsonResponse({ success: false, message: 'Invalid access token' }, 401);
+      return jsonResponse(response);
+    }
+
+    if (method === 'POST' && pathname === '/api/admin/roles/assign') {
+      const auth = await requireRole(request, env, 'admin');
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const targetId = String(body.target_user_id == null ? '' : body.target_user_id).trim();
+      const newRole = String(body.role == null ? '' : body.role).trim();
+      if (!targetId) {
+        return jsonResponse({ success: false, message: 'target_user_id is required.' }, 400);
+      }
+      if (newRole !== 'moderator' && newRole !== 'admin') {
+        return jsonResponse({ success: false, message: 'role must be "moderator" or "admin".' }, 400);
+      }
+
+      if (newRole === 'admin' && auth.user.role !== 'super_admin') {
+        return jsonResponse({ success: false, message: 'Only super admins can assign admins.' }, 403);
+      }
+
+      const target = await queryFirst(
+        env,
+        'SELECT id, role FROM user_accounts WHERE id = ?',
+        [targetId]
+      );
+      if (!target) {
+        return jsonResponse({ success: false, message: 'User not found.' }, 404);
+      }
+      if (target.id === auth.user.id) {
+        return jsonResponse({ success: false, message: 'You cannot change your own role.' }, 403);
+      }
+
+      const targetCurrent = target.role || 'user';
+      if (newRole === 'moderator') {
+        if (targetCurrent !== 'user') {
+          return jsonResponse({
+            success: false,
+            message: 'Target must currently be a regular user to become a moderator.',
+          }, 409);
+        }
+        if (auth.user.role === 'admin') {
+          const countRow = await queryFirst(
+            env,
+            `SELECT COUNT(*) AS c FROM user_accounts
+               WHERE role = 'moderator' AND role_assigned_by = ?`,
+            [auth.user.id]
+          );
+          if (Number(countRow?.c ?? 0) >= 3) {
+            return jsonResponse({
+              success: false,
+              message: 'You already manage 3 moderators. Remove one before assigning another.',
+            }, 409);
+          }
+        }
+      } else {
+        // newRole === 'admin'
+        if (targetCurrent !== 'user' && targetCurrent !== 'moderator') {
+          return jsonResponse({
+            success: false,
+            message: 'Only regular users or moderators can be promoted to admin.',
+          }, 409);
+        }
+      }
+
+      await execRun(
+        env,
+        `UPDATE user_accounts
+           SET role = ?, role_assigned_by = ?, role_assigned_at = datetime('now'),
+               updated_at = datetime('now')
+           WHERE id = ?`,
+        [newRole, auth.user.id, targetId]
+      );
+
+      return jsonResponse({ success: true, message: `Assigned ${newRole}.` });
+    }
+
+    if (method === 'POST' && pathname === '/api/admin/roles/remove') {
+      const auth = await requireRole(request, env, 'admin');
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const targetId = String(body.target_user_id == null ? '' : body.target_user_id).trim();
+      if (!targetId) {
+        return jsonResponse({ success: false, message: 'target_user_id is required.' }, 400);
+      }
+      const target = await queryFirst(
+        env,
+        'SELECT id, role, role_assigned_by FROM user_accounts WHERE id = ?',
+        [targetId]
+      );
+      if (!target) {
+        return jsonResponse({ success: false, message: 'User not found.' }, 404);
+      }
+      if (target.id === auth.user.id) {
+        return jsonResponse({ success: false, message: 'You cannot remove your own role.' }, 403);
+      }
+      const targetRole = target.role || 'user';
+      if (targetRole === 'user') {
+        return jsonResponse({ success: false, message: 'Target has no elevated role.' }, 409);
+      }
+      if (targetRole === 'super_admin') {
+        return jsonResponse({ success: false, message: 'Cannot demote a super admin.' }, 403);
+      }
+
+      if (auth.user.role === 'admin') {
+        if (targetRole !== 'moderator' || target.role_assigned_by !== auth.user.id) {
+          return jsonResponse({
+            success: false,
+            message: 'Admins can only remove moderators they assigned.',
+          }, 403);
+        }
+      }
+      // super_admin: any moderator or admin allowed (checked above)
+
+      await execRun(
+        env,
+        `UPDATE user_accounts
+           SET role = 'user', role_assigned_by = NULL, role_assigned_at = NULL,
+               updated_at = datetime('now')
+           WHERE id = ?`,
+        [targetId]
+      );
+
+      return jsonResponse({ success: true, message: 'Role removed.' });
     }
 
   return jsonResponse({ success: false, message: 'Route not found.' }, 404);

@@ -15,14 +15,6 @@ CREATE TABLE accounts (
   manual_time DATETIME,
   reverified_at DATETIME
 );
-CREATE TABLE admins (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT UNIQUE,
-  access_token TEXT UNIQUE,
-  role TEXT DEFAULT 'admin',
-  notification_email TEXT,
-  manual_notification_enabled INTEGER NOT NULL DEFAULT 0
-);
 CREATE TABLE account_info (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   wechat_id TEXT,
@@ -109,7 +101,13 @@ CREATE TABLE user_accounts (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_login_at TEXT,
   last_wechat_change_at TEXT,
-  password_changed_at TEXT
+  password_changed_at TEXT,
+  role TEXT NOT NULL DEFAULT 'user'
+    CHECK(role IN ('user','moderator','admin','super_admin')),
+  role_assigned_by TEXT REFERENCES user_accounts(id),
+  role_assigned_at TEXT,
+  notification_email TEXT,
+  manual_notification_enabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE login_rate_limits (
   bucket_key TEXT PRIMARY KEY,
@@ -138,3 +136,6 @@ CREATE INDEX idx_user_accounts_created_at
   ON user_accounts(created_at);
 CREATE INDEX idx_login_rate_limits_updated_at
   ON login_rate_limits(updated_at);
+CREATE INDEX idx_user_accounts_role_assigned_by
+  ON user_accounts(role_assigned_by)
+  WHERE role_assigned_by IS NOT NULL;

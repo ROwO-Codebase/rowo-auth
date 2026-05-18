@@ -28,6 +28,8 @@ export function subscribeSession(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+export type RowoRole = 'user' | 'moderator' | 'admin' | 'super_admin';
+
 export interface SessionUser {
   id: string;
   username: string;
@@ -36,6 +38,19 @@ export interface SessionUser {
   last_login_at: string | null;
   last_wechat_change_at: string | null;
   password_changed_at: string | null;
+  role: RowoRole;
+}
+
+export const ROLE_RANK: Record<RowoRole, number> = {
+  user: 0,
+  moderator: 1,
+  admin: 2,
+  super_admin: 3,
+};
+
+export function hasMinRole(role: RowoRole | undefined | null, min: RowoRole): boolean {
+  if (!role) return false;
+  return ROLE_RANK[role] >= ROLE_RANK[min];
 }
 
 export interface SessionVerification {
