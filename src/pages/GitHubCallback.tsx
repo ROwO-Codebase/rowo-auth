@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { CheckCircle2, XCircle, Loader2, Github } from 'lucide-react';
+import PostVerifyPrompt from '../components/PostVerifyPrompt';
 
 const consumedGithubCodes = new Set<string>();
 
@@ -12,6 +13,7 @@ export default function GitHubCallback() {
   const [message, setMessage] = useState('Verifying your GitHub identity...');
   const [githubData, setGithubData] = useState<{ github_id: string; login: string; avatar?: string; matched_email_domain?: string } | null>(null);
   const [wechatId, setWechatId] = useState('');
+  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean } | null>(null);
 
   const code = searchParams.get('code');
 
@@ -81,16 +83,16 @@ export default function GitHubCallback() {
       const data = await res.json();
 
       if (data.success) {
-        if (data.reverified) {
-          setStatus('success');
-          setMessage('Successfully reverified! Redirecting to rename page...');
-          setTimeout(() => {
-            navigate(`/rename?token=${data.rename_token}&expiry=${data.rename_token_expires_at}`);
-          }, 1500);
-          return;
-        }
         setStatus('success');
         setMessage('Successfully verified! Your WeChat account is now linked to your student status.');
+        if (data.bind_token && data.wechat_id) {
+          setPostVerify({
+            bindToken: data.bind_token,
+            wechatId: data.wechat_id,
+            method: 'GitHub',
+            reverified: Boolean(data.reverified),
+          });
+        }
       } else {
         setStatus('error');
         if (data.blacklisted && data.blacklist) {
@@ -104,6 +106,19 @@ export default function GitHubCallback() {
       setMessage('An error occurred while connecting your accounts.');
     }
   };
+
+  if (postVerify) {
+    return (
+      <div className="max-w-md mx-auto mt-12">
+        <PostVerifyPrompt
+          bindToken={postVerify.bindToken}
+          wechatId={postVerify.wechatId}
+          method={postVerify.method}
+          reverified={postVerify.reverified}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-md mx-auto mt-20">

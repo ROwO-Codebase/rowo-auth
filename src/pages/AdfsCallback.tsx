@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
-import { CheckCircle2, XCircle, Loader2, ShieldCheck } from 'lucide-react';
+import { XCircle, Loader2, ShieldCheck } from 'lucide-react';
+import PostVerifyPrompt from '../components/PostVerifyPrompt';
 
 export default function AdfsCallback() {
   const [searchParams] = useSearchParams();
@@ -9,6 +10,7 @@ export default function AdfsCallback() {
   const [status, setStatus] = useState<'input_wechat' | 'verifying' | 'success' | 'error'>('input_wechat');
   const [message, setMessage] = useState('');
   const [wechatId, setWechatId] = useState('');
+  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean } | null>(null);
 
   const code = searchParams.get('code');
 
@@ -35,16 +37,16 @@ export default function AdfsCallback() {
       });
       const data = await res.json();
       if (data.success) {
-        if (data.reverified) {
-          setStatus('success');
-          setMessage('Successfully reverified! Redirecting to rename page...');
-          setTimeout(() => {
-            navigate(`/rename?token=${data.rename_token}&expiry=${data.rename_token_expires_at}`);
-          }, 1500);
-          return;
-        }
         setStatus('success');
         setMessage(data.message || 'Your WeChat account is now verified with ADFS!');
+        if (data.bind_token && data.wechat_id) {
+          setPostVerify({
+            bindToken: data.bind_token,
+            wechatId: data.wechat_id,
+            method: 'ADFS',
+            reverified: Boolean(data.reverified),
+          });
+        }
       } else {
         setStatus('error');
         if (data.blacklisted && data.blacklist) {
@@ -58,6 +60,19 @@ export default function AdfsCallback() {
       setMessage('An error occurred while communicating with the server.');
     }
   };
+
+  if (postVerify) {
+    return (
+      <div className="max-w-md mx-auto mt-12">
+        <PostVerifyPrompt
+          bindToken={postVerify.bindToken}
+          wechatId={postVerify.wechatId}
+          method={postVerify.method}
+          reverified={postVerify.reverified}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-md mx-auto mt-20">
@@ -100,7 +115,7 @@ export default function AdfsCallback() {
           </div>
         ) : status === 'success' ? (
           <div className="flex flex-col items-center gap-4">
-            <CheckCircle2 className="w-16 h-16 text-emerald-500" />
+            <ShieldCheck className="w-16 h-16 text-emerald-500" />
             <h2 className="text-2xl font-bold text-slate-900">Verification Successful</h2>
             <p className="text-slate-600 mb-6">{message}</p>
             <button

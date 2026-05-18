@@ -55,7 +55,7 @@ export default function AdminPanel() {
   const [confirmRotateOpen, setConfirmRotateOpen] = useState(false);
   const [newTokenAlert, setNewTokenAlert] = useState<{isOpen: boolean, token: string}>({isOpen: false, token: ''});
   const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'accounts' | 'blacklist' | 'batch' | 'settings'>('accounts');
+  const [activeTab, setActiveTab] = useState<'accounts' | 'blacklist' | 'batch' | 'rowoUsers' | 'settings'>('accounts');
   const [blacklist, setBlacklist] = useState<any[]>([]);
   const [loadingBlacklist, setLoadingBlacklist] = useState(false);
 
@@ -246,6 +246,16 @@ export default function AdminPanel() {
               Batch Operations
               {activeTab === 'batch' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
             </button>
+            <button
+              onClick={() => setActiveTab('rowoUsers')}
+              className={clsx(
+                "px-4 py-2 text-sm font-medium transition-colors relative",
+                activeTab === 'rowoUsers' ? "text-indigo-600" : "text-slate-500 hover:text-slate-700"
+              )}
+            >
+              ROwO Users
+              {activeTab === 'rowoUsers' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
+            </button>
           </>
         )}
         <button
@@ -388,6 +398,8 @@ export default function AdminPanel() {
         </>
       ) : activeTab === 'blacklist' ? (
         <BlacklistTab token={token} blacklist={blacklist} loading={loadingBlacklist} onUpdate={fetchBlacklist} />
+      ) : activeTab === 'rowoUsers' ? (
+        <RowoUsersTab token={token} />
       ) : (
         <BatchTab token={token} onUpdate={fetchAccounts} />
       )}
@@ -1520,5 +1532,283 @@ function ConfirmDialog({ isOpen, title, message, onConfirm, onCancel, confirmTex
         </div>
       )}
     </AnimatePresence>
+  );
+}
+
+interface RowoUser {
+  id: string;
+  username: string;
+  wechat_id: string | null;
+  created_at: string;
+  last_login_at: string | null;
+  last_wechat_change_at: string | null;
+  password_changed_at: string | null;
+}
+
+function RowoUsersTab({ token }: { token: string }) {
+  const [users, setUsers] = useState<RowoUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [actionUser, setActionUser] = useState<RowoUser | null>(null);
+  const [actionMode, setActionMode] = useState<'reset' | 'unbind' | null>(null);
+  const [newPassword, setNewPassword] = useState('');
+  const [actionStatus, setActionStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [actionMessage, setActionMessage] = useState('');
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`${__API_ENDPOINT__}/api/admin/users`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (data.success) setUsers(data.users || []);
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const filtered = users.filter((u) => {
+    if (!search.trim()) return true;
+    const s = search.trim().toLowerCase();
+    return (
+      u.username.toLowerCase().includes(s) ||
+      (u.wechat_id || '').toLowerCase().includes(s) ||
+      u.id.toLowerCase().includes(s)
+    );
+  });
+
+  const closeAction = () => {
+    setActionUser(null);
+    setActionMode(null);
+    setNewPassword('');
+    setActionStatus('idle');
+    setActionMessage('');
+  };
+
+  const submitReset = async () => {
+    if (!actionUser || !newPassword) return;
+    setActionStatus('loading');
+    setActionMessage('');
+    try {
+      const res = await fetch(
+        `${__API_ENDPOINT__}/api/admin/users/${encodeURIComponent(actionUser.id)}/reset-password`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ new_password: newPassword }),
+        }
+      );
+      const data = await res.json();
+      if (data.success) {
+        setActionStatus('success');
+        setActionMessage('Password reset.');
+        setTimeout(closeAction, 700);
+      } else {
+        setActionStatus('error');
+        setActionMessage(data.message || 'Could not reset password.');
+      }
+    } catch {
+      setActionStatus('error');
+      setActionMessage('Network error.');
+    }
+  };
+
+  const submitUnbind = async () => {
+    if (!actionUser) return;
+    setActionStatus('loading');
+    setActionMessage('');
+    try {
+      const res = await fetch(
+        `${__API_ENDPOINT__}/api/admin/users/${encodeURIComponent(actionUser.id)}/unbind-wechat`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({}),
+        }
+      );
+      const data = await res.json();
+      if (data.success) {
+        setActionStatus('success');
+        setActionMessage('WeChat ID unbound.');
+        await load();
+        setTimeout(closeAction, 700);
+      } else {
+        setActionStatus('error');
+        setActionMessage(data.message || 'Could not unbind.');
+      }
+    } catch {
+      setActionStatus('error');
+      setActionMessage('Network error.');
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-end gap-2 mb-4">
+        <button
+          onClick={load}
+          disabled={loading}
+          className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-50"
+          title="Refresh"
+        >
+          <RotateCcw className={clsx('w-5 h-5', loading && 'animate-spin')} />
+        </button>
+        <div className="relative">
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+            <Search className="h-4 w-4 text-slate-400" />
+          </div>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="block w-full sm:w-64 pl-10 pr-3 py-2 border border-slate-300 rounded-lg leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors"
+            placeholder="Search by username or wechat_id..."
+          />
+        </div>
+      </div>
+
+      <div className="bg-white shadow-sm border border-slate-200 rounded-2xl overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-slate-200">
+            <thead className="bg-slate-50">
+              <tr>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Username</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">WeChat ID</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Created</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Last Login</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Last WeChat Change</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-slate-500 uppercase tracking-wider">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-slate-200">
+              {loading ? (
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400 text-sm">Loading...</td></tr>
+              ) : filtered.length === 0 ? (
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400 text-sm">No users.</td></tr>
+              ) : (
+                filtered.map((u) => (
+                  <tr key={u.id}>
+                    <td className="px-4 py-3 text-sm font-medium text-slate-900">@{u.username}</td>
+                    <td className="px-4 py-3 text-sm font-mono text-slate-600">{u.wechat_id || <span className="text-slate-400">—</span>}</td>
+                    <td className="px-4 py-3 text-sm text-slate-500">{u.created_at ? format(new Date(u.created_at), 'yyyy-MM-dd') : '—'}</td>
+                    <td className="px-4 py-3 text-sm text-slate-500">{u.last_login_at ? format(new Date(u.last_login_at), 'yyyy-MM-dd') : '—'}</td>
+                    <td className="px-4 py-3 text-sm text-slate-500">{u.last_wechat_change_at ? format(new Date(u.last_wechat_change_at), 'yyyy-MM-dd') : '—'}</td>
+                    <td className="px-4 py-3 text-right text-sm space-x-2">
+                      <button
+                        onClick={() => { setActionUser(u); setActionMode('reset'); }}
+                        className="text-indigo-600 hover:text-indigo-700 font-medium"
+                      >
+                        Reset password
+                      </button>
+                      {u.wechat_id && (
+                        <button
+                          onClick={() => { setActionUser(u); setActionMode('unbind'); }}
+                          className="text-amber-600 hover:text-amber-700 font-medium"
+                        >
+                          Unbind
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <AnimatePresence>
+        {actionUser && actionMode === 'reset' && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+            onClick={closeAction}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold text-slate-900 mb-1">Reset password for @{actionUser.username}</h3>
+              <p className="text-sm text-slate-500 mb-4">Set a new password for this user. They will be able to log in with the new password immediately.</p>
+              <input
+                type="text"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="New password (min 10 chars, letter + digit)"
+                className="block w-full px-4 py-2.5 rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm mb-3"
+              />
+              {actionStatus === 'error' && (
+                <div className="text-sm text-red-700 mb-3">{actionMessage}</div>
+              )}
+              {actionStatus === 'success' && (
+                <div className="text-sm text-emerald-700 mb-3">{actionMessage}</div>
+              )}
+              <div className="flex gap-2">
+                <button onClick={closeAction} className="flex-1 py-2 px-4 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-xl hover:bg-slate-50">Cancel</button>
+                <button
+                  onClick={submitReset}
+                  disabled={actionStatus === 'loading' || !newPassword}
+                  className="flex-1 py-2 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white text-sm font-medium rounded-xl"
+                >
+                  {actionStatus === 'loading' ? 'Saving...' : 'Reset password'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+        {actionUser && actionMode === 'unbind' && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+            onClick={closeAction}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold text-slate-900 mb-1">Unbind WeChat ID</h3>
+              <p className="text-sm text-slate-500 mb-4">
+                Remove the WeChat binding from @{actionUser.username} (currently bound to{' '}
+                <span className="font-mono">{actionUser.wechat_id}</span>). The wechat_id row in the accounts table is not affected.
+              </p>
+              {actionStatus === 'error' && (
+                <div className="text-sm text-red-700 mb-3">{actionMessage}</div>
+              )}
+              {actionStatus === 'success' && (
+                <div className="text-sm text-emerald-700 mb-3">{actionMessage}</div>
+              )}
+              <div className="flex gap-2">
+                <button onClick={closeAction} className="flex-1 py-2 px-4 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-xl hover:bg-slate-50">Cancel</button>
+                <button
+                  onClick={submitUnbind}
+                  disabled={actionStatus === 'loading'}
+                  className="flex-1 py-2 px-4 bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium rounded-xl"
+                >
+                  {actionStatus === 'loading' ? 'Unbinding...' : 'Unbind'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }

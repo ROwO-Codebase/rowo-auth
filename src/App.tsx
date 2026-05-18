@@ -14,8 +14,11 @@ import AdfsCallback from './pages/AdfsCallback';
 import AdminPanel from './pages/AdminPanel';
 import AboutPage from './pages/AboutPage';
 import PrivacyPage from './pages/PrivacyPage';
-import RenamePage from './pages/RenamePage';
 import FAQPage from './pages/FAQPage';
+import SignupPage from './pages/SignupPage';
+import LoginPage from './pages/LoginPage';
+import UserCenterPage from './pages/UserCenterPage';
+import { SessionProvider } from './contexts/SessionContext';
 
 function AdfsRedirect() {
   useEffect(() => {
@@ -26,22 +29,26 @@ function AdfsRedirect() {
 
 export default function App() {
   return (
-    <Router>
-      <Layout>
-        <Routes>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/verify" element={<VerificationPage />} />
-          <Route path="/verify/discord/callback" element={<DiscordCallback />} />
-          <Route path="/verify/github/callback" element={<GitHubCallback />} />
-          <Route path="/verify/adfs/callback" element={<AdfsCallback />} />
-          <Route path="/adfs" element={<AdfsRedirect />} />
-          <Route path="/admin" element={<AdminPanel />} />
-          <Route path="/about" element={<AboutPage />} />
-          <Route path="/privacy" element={<PrivacyPage />} />
-          <Route path="/rename" element={<RenamePage />} />
-          <Route path="/faq" element={<FAQPage />} />
-        </Routes>
-      </Layout>
-    </Router>
+    <SessionProvider>
+      <Router>
+        <Layout>
+          <Routes>
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/verify" element={<VerificationPage />} />
+            <Route path="/verify/discord/callback" element={<DiscordCallback />} />
+            <Route path="/verify/github/callback" element={<GitHubCallback />} />
+            <Route path="/verify/adfs/callback" element={<AdfsCallback />} />
+            <Route path="/adfs" element={<AdfsRedirect />} />
+            <Route path="/admin" element={<AdminPanel />} />
+            <Route path="/about" element={<AboutPage />} />
+            <Route path="/privacy" element={<PrivacyPage />} />
+            <Route path="/faq" element={<FAQPage />} />
+            <Route path="/signup" element={<SignupPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/center" element={<UserCenterPage />} />
+          </Routes>
+        </Layout>
+      </Router>
+    </SessionProvider>
   );
 }

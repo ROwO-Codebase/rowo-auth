@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Shield, Mail, MessageSquare, AlertCircle, CheckCircle2, ChevronRight, Lock, Github } from 'lucide-react';
+import { Shield, Mail, AlertCircle, CheckCircle2, ChevronRight, Lock, Github } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useSearchParams, useNavigate } from 'react-router-dom';
+import PostVerifyPrompt from '../components/PostVerifyPrompt';
 
 const DiscordIcon = ({ className }: { className?: string }) => (
   <svg 
@@ -35,6 +36,7 @@ export default function VerificationPage() {
   const [showServers, setShowServers] = useState(false);
   const [trustedServers, setTrustedServers] = useState<any[]>([]);
   const [loadingServers, setLoadingServers] = useState(false);
+  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean } | null>(null);
 
   const fetchServerInfo = async (inviteCode: string) => {
     try {
@@ -200,18 +202,16 @@ export default function VerificationPage() {
 
       const data = await res.json();
       if (data.success) {
-        if (data.reverified) {
-          setStatus('success');
-          setMessage('Successfully reverified! Redirecting to rename page...');
-          setTimeout(() => {
-            navigate(`/rename?token=${data.rename_token}&expiry=${data.rename_token_expires_at}`);
-          }, 1500);
-          return;
-        }
         setStatus('success');
         setMessage(data.message);
-        // Clear form after success
-        setWechatId('');
+        if (data.bind_token && data.wechat_id) {
+          setPostVerify({
+            bindToken: data.bind_token,
+            wechatId: data.wechat_id,
+            method: activeMethod === 'email' ? 'Email' : activeMethod,
+            reverified: Boolean(data.reverified),
+          });
+        }
         setEmailPrefix('');
         setVerificationCode('');
         setManualNotes('');
@@ -228,6 +228,19 @@ export default function VerificationPage() {
       setMessage('An error occurred during verification.');
     }
   };
+
+  if (postVerify) {
+    return (
+      <div className="max-w-md mx-auto mt-8">
+        <PostVerifyPrompt
+          bindToken={postVerify.bindToken}
+          wechatId={postVerify.wechatId}
+          method={postVerify.method}
+          reverified={postVerify.reverified}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-4xl mx-auto">
