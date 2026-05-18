@@ -36,7 +36,7 @@ export default function VerificationPage() {
   const [showServers, setShowServers] = useState(false);
   const [trustedServers, setTrustedServers] = useState<any[]>([]);
   const [loadingServers, setLoadingServers] = useState(false);
-  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean } | null>(null);
+  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean; alreadyLinkedToRowo: boolean } | null>(null);
 
   const fetchServerInfo = async (inviteCode: string) => {
     try {
@@ -210,6 +210,7 @@ export default function VerificationPage() {
             wechatId: data.wechat_id,
             method: activeMethod === 'email' ? 'Email' : activeMethod,
             reverified: Boolean(data.reverified),
+            alreadyLinkedToRowo: Boolean(data.already_linked_to_rowo),
           });
         }
         setEmailPrefix('');
@@ -237,6 +238,7 @@ export default function VerificationPage() {
           wechatId={postVerify.wechatId}
           method={postVerify.method}
           reverified={postVerify.reverified}
+          alreadyLinkedToRowo={postVerify.alreadyLinkedToRowo}
         />
       </div>
     );

@@ -10,6 +10,7 @@ interface Props {
   wechatId: string;
   method: string;
   reverified?: boolean;
+  alreadyLinkedToRowo?: boolean;
 }
 
 type Phase =
@@ -21,12 +22,13 @@ type Phase =
   | 'switched'               // switch succeeded
   | 'error';
 
-export default function PostVerifyPrompt({ bindToken, wechatId, method, reverified }: Props) {
+export default function PostVerifyPrompt({ bindToken, wechatId, method, reverified, alreadyLinkedToRowo }: Props) {
   const navigate = useNavigate();
   const { user, refresh, signOut } = useSession();
   const [phase, setPhase] = useState<Phase>('choose');
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [currentPassword, setCurrentPassword] = useState('');
+  void method; // accepted for future logging; not currently rendered
 
   useEffect(() => {
     if (!user) {
@@ -172,41 +174,52 @@ export default function PostVerifyPrompt({ bindToken, wechatId, method, reverifi
           }
         />
 
-        <form onSubmit={handleSwitchSubmit} className="space-y-3">
-          <div>
-            <label htmlFor="switchPassword" className="block text-sm font-medium text-slate-700 mb-1 ml-1">
-              Confirm with current password to switch binding
-            </label>
-            <input
-              id="switchPassword"
-              type="password"
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              autoComplete="current-password"
-              placeholder="Current password"
-              className="block w-full px-4 py-3 rounded-xl border border-slate-300 shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-            />
-            <p className="text-xs text-slate-500 mt-1 ml-1">
-              Switching counts against the once-per-year limit.
-            </p>
+        {alreadyLinkedToRowo ? (
+          <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-sm text-amber-800 flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <span>
+              The verified WeChat ID is already linked to a different ROwO account. You can't
+              switch your current account's binding to it. Sign out and sign in to that account
+              instead, or keep your current binding.
+            </span>
           </div>
-
-          {errorMessage && (
-            <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-sm text-red-700 flex items-start gap-2">
-              <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              <span>{errorMessage}</span>
+        ) : (
+          <form onSubmit={handleSwitchSubmit} className="space-y-3">
+            <div>
+              <label htmlFor="switchPassword" className="block text-sm font-medium text-slate-700 mb-1 ml-1">
+                Confirm with current password to switch binding
+              </label>
+              <input
+                id="switchPassword"
+                type="password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                autoComplete="current-password"
+                placeholder="Current password"
+                className="block w-full px-4 py-3 rounded-xl border border-slate-300 shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              />
+              <p className="text-xs text-slate-500 mt-1 ml-1">
+                Switching counts against the once-per-year limit.
+              </p>
             </div>
-          )}
 
-          <button
-            type="submit"
-            disabled={phase === 'switching' || !currentPassword}
-            className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-medium rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2"
-          >
-            {phase === 'switching' ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
-            {phase === 'switching' ? 'Switching...' : 'Switch binding to new WeChat ID'}
-          </button>
-        </form>
+            {errorMessage && (
+              <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-sm text-red-700 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={phase === 'switching' || !currentPassword}
+              className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-medium rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2"
+            >
+              {phase === 'switching' ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+              {phase === 'switching' ? 'Switching...' : 'Switch binding to new WeChat ID'}
+            </button>
+          </form>
+        )}
 
         <div className="grid grid-cols-2 gap-2 pt-2">
           <button
@@ -219,13 +232,15 @@ export default function PostVerifyPrompt({ bindToken, wechatId, method, reverifi
             onClick={() => {
               signOut();
               navigate(
-                `/signup?bind_token=${encodeURIComponent(bindToken)}&wechat_id=${encodeURIComponent(wechatId)}`,
+                alreadyLinkedToRowo
+                  ? `/login?bind_token=${encodeURIComponent(bindToken)}&next=${encodeURIComponent('/center')}`
+                  : `/signup?bind_token=${encodeURIComponent(bindToken)}&wechat_id=${encodeURIComponent(wechatId)}`,
                 { replace: true }
               );
             }}
             className="py-2.5 px-3 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-xl hover:bg-slate-50 transition-colors"
           >
-            Sign out & use another
+            {alreadyLinkedToRowo ? 'Sign out & sign in to other' : 'Sign out & use another'}
           </button>
         </div>
       </CardShell>
@@ -254,6 +269,49 @@ export default function PostVerifyPrompt({ bindToken, wechatId, method, reverifi
   // phase === 'choose' — not logged in
   const signupHref = `/signup?bind_token=${encodeURIComponent(bindToken)}&wechat_id=${encodeURIComponent(wechatId)}`;
   const loginHref = `/login?bind_token=${encodeURIComponent(bindToken)}&next=${encodeURIComponent('/center')}`;
+
+  if (alreadyLinkedToRowo) {
+    return (
+      <CardShell>
+        <Header
+          icon={<LogIn className="w-7 h-7" />}
+          color="indigo"
+          title={reverified ? 'Re-verified — sign in to manage' : 'Verified — sign in to manage'}
+          subtitle={
+            <>
+              This WeChat ID is already linked to an existing <strong>ROwO Account</strong>.
+              Sign in to that account to manage it.
+              <br />
+              <span className="font-mono text-xs text-slate-500 break-all">
+                Verified WeChat ID: {wechatId}
+              </span>
+            </>
+          }
+        />
+
+        <div className="space-y-2">
+          <button
+            onClick={() => navigate(loginHref)}
+            className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2"
+          >
+            <LogIn className="w-4 h-4" />
+            Sign in to existing ROwO Account
+          </button>
+          <button
+            onClick={() => navigate('/')}
+            className="w-full py-2.5 text-sm text-slate-500 hover:text-slate-700 transition-colors"
+          >
+            Skip for now
+          </button>
+        </div>
+
+        <p className="text-xs text-slate-400 text-center mt-2">
+          Lost access to that account? Contact an admin to recover it.
+        </p>
+      </CardShell>
+    );
+  }
+
   return (
     <CardShell>
       <Header
