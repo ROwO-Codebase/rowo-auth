@@ -1168,6 +1168,20 @@ async function requireRole(request, env, minRole) {
   return { user: auth.user, admin: userToAdminShape(auth.user) };
 }
 
+// Parses ?page=&page_size=&q= into validated values plus a ready-to-bind LIKE
+// pattern. `like` is null when q is empty, so callers can skip the WHERE clause.
+function parsePaginationParams(url, { defaultPageSize = 50, maxPageSize = 200 } = {}) {
+  const rawPage = Number(url.searchParams.get('page'));
+  const rawSize = Number(url.searchParams.get('page_size'));
+  const page = Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1;
+  const pageSize = Number.isFinite(rawSize) && rawSize >= 1
+    ? Math.min(Math.floor(rawSize), maxPageSize)
+    : defaultPageSize;
+  const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
+  const like = q ? `%${q.replace(/[%_\\]/g, (m) => `\\${m}`)}%` : null;
+  return { page, pageSize, q, like };
+}
+
 function resolveAllowedOrigin(request, env) {
   const configured = String(env.CORS_ALLOW_ORIGINS || '*')
     .split(',')
@@ -2684,31 +2698,45 @@ async function handleRequest(request, env, ctx) {
       const auth = await requireRole(request, env, 'moderator');
       if (auth.response) return auth.response;
 
-      let accounts;
-      if (auth.admin.role === 'moderator') {
-        accounts = await queryAll(
-          env,
-          `
-            SELECT * FROM accounts
-            WHERE manual_status = 'pending'
-            ORDER BY verification_time DESC
-          `
-        );
-      } else {
-        accounts = await queryAll(
-          env,
-          `
-            SELECT * FROM accounts
-            ORDER BY
-              CASE WHEN manual_status = 'pending' THEN 0 ELSE 1 END,
-              verification_time DESC
-          `
-        );
+      const { page, pageSize, like } = parsePaginationParams(url);
+      const isModerator = auth.admin.role === 'moderator';
+
+      const where = [];
+      const params = [];
+      if (isModerator) {
+        where.push("manual_status = 'pending'");
       }
+      if (like) {
+        where.push(
+          "(LOWER(wechat_id) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(student_name, '')) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(student_id, '')) LIKE ? ESCAPE '\\')"
+        );
+        params.push(like, like, like);
+      }
+      const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+      const countRow = await queryFirst(
+        env,
+        `SELECT COUNT(*) AS c FROM accounts ${whereClause}`,
+        params
+      );
+      const total = Number(countRow?.c ?? 0);
+
+      const orderBy = isModerator
+        ? 'ORDER BY verification_time DESC'
+        : "ORDER BY CASE WHEN manual_status = 'pending' THEN 0 ELSE 1 END, verification_time DESC";
+
+      const accounts = await queryAll(
+        env,
+        `SELECT * FROM accounts ${whereClause} ${orderBy} LIMIT ? OFFSET ?`,
+        [...params, pageSize, (page - 1) * pageSize]
+      );
 
       return jsonResponse({
         success: true,
         accounts,
+        total,
+        page,
+        page_size: pageSize,
         admin: { username: auth.admin.username, role: auth.admin.role },
       });
     }
@@ -3156,18 +3184,44 @@ async function handleRequest(request, env, ctx) {
     if (method === 'GET' && pathname === '/api/admin/users') {
       const auth = await requireRole(request, env, 'admin');
       if (auth.response) return auth.response;
+
+      const { page, pageSize, like } = parsePaginationParams(url);
+
+      const where = [];
+      const params = [];
+      if (like) {
+        where.push(
+          "(LOWER(username_normalized) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(wechat_id, '')) LIKE ? ESCAPE '\\' OR LOWER(id) LIKE ? ESCAPE '\\')"
+        );
+        params.push(like, like, like);
+      }
+      const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+      const countRow = await queryFirst(
+        env,
+        `SELECT COUNT(*) AS c FROM user_accounts ${whereClause}`,
+        params
+      );
+      const total = Number(countRow?.c ?? 0);
+
       const rows = await queryAll(
         env,
         `
           SELECT id, username_display, wechat_id, created_at, last_login_at,
                  last_wechat_change_at, password_changed_at, role
           FROM user_accounts
+          ${whereClause}
           ORDER BY created_at DESC
-          LIMIT 500
-        `
+          LIMIT ? OFFSET ?
+        `,
+        [...params, pageSize, (page - 1) * pageSize]
       );
+
       return jsonResponse({
         success: true,
+        total,
+        page,
+        page_size: pageSize,
         users: rows.map((row) => ({
           id: row.id,
           username: row.username_display,

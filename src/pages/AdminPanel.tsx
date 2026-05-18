@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { ShieldAlert, Search, MoreVertical, X, AlertTriangle, ShieldOff, Save, ShieldCheck, CheckCircle, Info, Plus, Edit2, Trash2, RotateCcw, Pencil, RefreshCw, Bell, Users, UserPlus, UserMinus, LogIn, ChevronLeft, ChevronRight } from 'lucide-react';
@@ -87,8 +87,10 @@ interface AccountData {
 export default function AdminPanel() {
   const { user, loading: sessionLoading } = useSession();
   const [accounts, setAccounts] = useState<AccountData[]>([]);
+  const [accountsTotal, setAccountsTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedAccount, setSelectedAccount] = useState<AccountData | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<'accounts' | 'blacklist' | 'batch' | 'rowoUsers' | 'roles' | 'settings'>('accounts');
@@ -96,30 +98,49 @@ export default function AdminPanel() {
   const [loadingBlacklist, setLoadingBlacklist] = useState(false);
   const [accountsPage, setAccountsPage] = useState(1);
 
+  // Debounce the search box so each keystroke doesn't hit the API.
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearch(searchTerm.trim()), 300);
+    return () => clearTimeout(handle);
+  }, [searchTerm]);
+
+  // Searching effectively narrows the result set, so jump back to page 1.
   useEffect(() => {
     setAccountsPage(1);
-  }, [searchTerm]);
+  }, [debouncedSearch]);
 
   const role: RowoRole = (user?.role as RowoRole) || 'user';
   const isAtLeastAdmin = hasMinRole(role, 'admin');
   const isModeratorOnly = role === 'moderator';
 
-  const fetchAccounts = async (isManual = false) => {
-    if (isManual) setRefreshing(true);
+  const accountsFetchRef = useRef(0);
+  const fetchAccounts = async (opts: { isManual?: boolean; page?: number; q?: string } = {}) => {
+    const seq = ++accountsFetchRef.current;
+    if (opts.isManual) setRefreshing(true);
     else setLoading(true);
     try {
-      const res = await fetch(`${__API_ENDPOINT__}/api/admin/accounts`, {
+      const params = new URLSearchParams({
+        page: String(opts.page ?? accountsPage),
+        page_size: String(PAGE_SIZE),
+      });
+      const q = opts.q ?? debouncedSearch;
+      if (q) params.set('q', q);
+      const res = await fetch(`${__API_ENDPOINT__}/api/admin/accounts?${params}`, {
         headers: authHeaders(),
       });
       const data = await res.json();
+      if (accountsFetchRef.current !== seq) return; // stale response
       if (data.success) {
         setAccounts(data.accounts);
+        setAccountsTotal(Number(data.total ?? 0));
       }
     } catch {
       // ignore
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (accountsFetchRef.current === seq) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
@@ -141,10 +162,13 @@ export default function AdminPanel() {
 
   useEffect(() => {
     if (!user || role === 'user') return;
-    if (activeTab === 'accounts') fetchAccounts();
-    else if (activeTab === 'blacklist') fetchBlacklist();
+    if (activeTab === 'accounts') {
+      fetchAccounts({ page: accountsPage, q: debouncedSearch });
+    } else if (activeTab === 'blacklist') {
+      fetchBlacklist();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, user?.id, role]);
+  }, [activeTab, user?.id, role, accountsPage, debouncedSearch]);
 
   if (sessionLoading) {
     return (
@@ -190,16 +214,6 @@ export default function AdminPanel() {
     );
   }
 
-  const filteredAccounts = accounts.filter(
-    (acc) =>
-      acc.wechat_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      acc.student_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      acc.student_id?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-  const pagedAccounts = filteredAccounts.slice(
-    (accountsPage - 1) * PAGE_SIZE,
-    accountsPage * PAGE_SIZE
-  );
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -292,7 +306,7 @@ export default function AdminPanel() {
         <>
           <div className="flex items-center justify-end gap-2 mb-4">
             <button
-              onClick={() => fetchAccounts(true)}
+              onClick={() => fetchAccounts({ isManual: true })}
               disabled={loading || refreshing}
               className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-50"
               title="Refresh user list"
@@ -342,14 +356,14 @@ export default function AdminPanel() {
                         Loading accounts...
                       </td>
                     </tr>
-                  ) : pagedAccounts.length === 0 ? (
+                  ) : accounts.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="px-6 py-12 text-center text-sm text-slate-500">
                         No accounts found.
                       </td>
                     </tr>
                   ) : (
-                    pagedAccounts.map((account) => (
+                    accounts.map((account) => (
                       <tr key={account.wechat_id} className={clsx("hover:bg-slate-50 transition-colors", account.manual_status === 'pending' && "bg-amber-50/50")}>
                         <td className="px-6 py-4">
                           <div className="text-sm font-medium text-slate-900 flex flex-wrap items-center gap-2 break-all">
@@ -412,7 +426,7 @@ export default function AdminPanel() {
             </div>
             <Pagination
               page={accountsPage}
-              totalItems={filteredAccounts.length}
+              totalItems={accountsTotal}
               onChange={setAccountsPage}
             />
           </div>
@@ -1507,8 +1521,10 @@ interface RowoUser {
 
 function RowoUsersTab() {
   const [users, setUsers] = useState<RowoUser[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
   const [actionUser, setActionUser] = useState<RowoUser | null>(null);
   const [actionMode, setActionMode] = useState<'reset' | 'unbind' | null>(null);
@@ -1517,39 +1533,44 @@ function RowoUsersTab() {
   const [actionMessage, setActionMessage] = useState('');
 
   useEffect(() => {
-    setPage(1);
+    const handle = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(handle);
   }, [search]);
 
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
+
+  const fetchSeq = useRef(0);
   const load = async () => {
+    const seq = ++fetchSeq.current;
     setLoading(true);
     try {
-      const res = await fetch(`${__API_ENDPOINT__}/api/admin/users`, {
+      const params = new URLSearchParams({
+        page: String(page),
+        page_size: String(PAGE_SIZE),
+      });
+      if (debouncedSearch) params.set('q', debouncedSearch);
+      const res = await fetch(`${__API_ENDPOINT__}/api/admin/users?${params}`, {
         headers: authHeaders(),
       });
       const data = await res.json();
-      if (data.success) setUsers(data.users || []);
+      if (fetchSeq.current !== seq) return;
+      if (data.success) {
+        setUsers(data.users || []);
+        setTotal(Number(data.total ?? 0));
+      }
     } catch {
       // ignore
     } finally {
-      setLoading(false);
+      if (fetchSeq.current === seq) setLoading(false);
     }
   };
 
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const filtered = users.filter((u) => {
-    if (!search.trim()) return true;
-    const s = search.trim().toLowerCase();
-    return (
-      u.username.toLowerCase().includes(s) ||
-      (u.wechat_id || '').toLowerCase().includes(s) ||
-      u.id.toLowerCase().includes(s)
-    );
-  });
-  const pagedUsers = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  }, [page, debouncedSearch]);
 
   const closeAction = () => {
     setActionUser(null);
@@ -1658,10 +1679,10 @@ function RowoUsersTab() {
             <tbody className="bg-white divide-y divide-slate-200">
               {loading ? (
                 <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400 text-sm">Loading...</td></tr>
-              ) : pagedUsers.length === 0 ? (
+              ) : users.length === 0 ? (
                 <tr><td colSpan={7} className="px-4 py-8 text-center text-slate-400 text-sm">No users.</td></tr>
               ) : (
-                pagedUsers.map((u) => (
+                users.map((u) => (
                   <tr key={u.id}>
                     <td className="px-4 py-3 text-sm font-medium text-slate-900">@{u.username}</td>
                     <td className="px-4 py-3 text-sm"><RoleBadge role={u.role} /></td>
@@ -1691,7 +1712,7 @@ function RowoUsersTab() {
             </tbody>
           </table>
         </div>
-        <Pagination page={page} totalItems={filtered.length} onChange={setPage} />
+        <Pagination page={page} totalItems={total} onChange={setPage} />
       </div>
 
       <AnimatePresence>
