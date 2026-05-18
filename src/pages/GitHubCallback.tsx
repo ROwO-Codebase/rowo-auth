@@ -13,6 +13,7 @@ export default function GitHubCallback() {
   const [message, setMessage] = useState('Verifying your GitHub identity...');
   const [githubData, setGithubData] = useState<{ github_id: string; login: string; avatar?: string; matched_email_domain?: string } | null>(null);
   const [wechatId, setWechatId] = useState('');
+  const [isReverify, setIsReverify] = useState(false);
   const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean; alreadyLinkedToRowo: boolean } | null>(null);
 
   const code = searchParams.get('code');
@@ -45,6 +46,10 @@ export default function GitHubCallback() {
             avatar: data.avatar,
             matched_email_domain: data.matched_email_domain,
           });
+          if (data.existing_wechat_id) {
+            setWechatId(data.existing_wechat_id);
+            setIsReverify(true);
+          }
           setStatus('input_wechat');
           setMessage('GitHub verified! Now enter your WeChat ID to complete the link.');
         } else {
@@ -155,26 +160,33 @@ export default function GitHubCallback() {
               </div>
             )}
             <div>
-              <h2 className="text-2xl font-bold text-slate-900">Link WeChat ID</h2>
+              <h2 className="text-2xl font-bold text-slate-900">{isReverify ? 'Re-verify Existing Account' : 'Link WeChat ID'}</h2>
               <p className="text-slate-500 mt-2">Logged in as <span className="font-semibold text-slate-900">{githubData?.login}</span></p>
               {githubData?.matched_email_domain && (
                 <p className="text-xs text-slate-400 mt-1">Verified email domain: {githubData.matched_email_domain}</p>
               )}
+              {isReverify && (
+                <p className="mt-3 text-sm text-slate-600">
+                  WeChat ID: <span className="font-mono text-slate-900">{wechatId}</span>
+                </p>
+              )}
             </div>
             <form onSubmit={handleConnect} className="w-full space-y-4">
-              <input
-                type="text"
-                value={wechatId}
-                onChange={(e) => setWechatId(e.target.value)}
-                placeholder="Enter your WeChat ID"
-                required
-                className="block w-full px-4 py-3 rounded-xl border border-slate-300 shadow-sm focus:ring-2 focus:ring-slate-800 focus:border-slate-800 sm:text-sm transition-colors"
-              />
+              {!isReverify && (
+                <input
+                  type="text"
+                  value={wechatId}
+                  onChange={(e) => setWechatId(e.target.value)}
+                  placeholder="Enter your WeChat ID"
+                  required
+                  className="block w-full px-4 py-3 rounded-xl border border-slate-300 shadow-sm focus:ring-2 focus:ring-slate-800 focus:border-slate-800 sm:text-sm transition-colors"
+                />
+              )}
               <button
                 type="submit"
                 className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 text-white font-medium rounded-xl shadow-sm transition-colors"
               >
-                Complete Verification
+                {isReverify ? 'Continue Re-verification' : 'Complete Verification'}
               </button>
             </form>
           </div>

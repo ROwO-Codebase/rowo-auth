@@ -342,6 +342,24 @@ async function isWechatIdLinkedToRowoAccount(env, wechatId) {
   return Boolean(row);
 }
 
+// Look up the existing wechat_id for a verified identity (re-verify auto-fill).
+// Caller supplies the v1/v2 dual hashes (from dualHashSensitive or decodeDualHash).
+async function findVerifiedWechatIdByIdentityHashes(env, columnName, hashes) {
+  if (!HASHED_ACCOUNT_COLUMNS.has(columnName)) return null;
+  if (!hashes) return null;
+  const candidates = [hashes.v1, hashes.v2].filter((h) => h != null && h !== '');
+  if (candidates.length === 0) return null;
+  const placeholders = candidates.map(() => '?').join(', ');
+  const row = await queryFirst(
+    env,
+    `SELECT wechat_id FROM accounts
+       WHERE ${columnName} IN (${placeholders}) AND verified_status = 1
+       LIMIT 1`,
+    candidates
+  );
+  return row ? row.wechat_id : null;
+}
+
 async function consumeBindToken(env, token) {
   if (!env.ROWO_AUTH_JWT_SECRET) return null;
   const payload = await verifyRowoJwt(env, token, 'bind');
@@ -1314,6 +1332,33 @@ async function handleRequest(request, env, ctx) {
       return jsonResponse({ success: true, code });
     }
 
+    if (method === 'POST' && pathname === '/api/verify/adfs/preview') {
+      const body = await parseJson(request);
+      const { code } = body;
+      if (!code) {
+        return jsonResponse({ success: false, message: 'code is required.' }, 400);
+      }
+      const codeHash = await sha256Hex(String(code));
+      const row = await queryFirst(
+        env,
+        'SELECT student_id, expires_at FROM adfs_verification_codes WHERE code_hash = ?',
+        [codeHash]
+      );
+      if (!row) {
+        return jsonResponse({ success: true, existing_wechat_id: null, code_valid: false });
+      }
+      if (new Date(row.expires_at) < new Date()) {
+        return jsonResponse({ success: true, existing_wechat_id: null, code_valid: false });
+      }
+      const studentIdHashes = decodeDualHash(row.student_id);
+      const existingWechatId = await findVerifiedWechatIdByIdentityHashes(env, 'student_id', studentIdHashes);
+      return jsonResponse({
+        success: true,
+        code_valid: true,
+        existing_wechat_id: existingWechatId,
+      });
+    }
+
     if (method === 'POST' && pathname === '/api/verify/adfs') {
       const body = await parseJson(request);
       const { wechat_id, code } = body;
@@ -1756,6 +1801,14 @@ async function handleRequest(request, env, ctx) {
         return jsonResponse({ success: false, message: 'Discord identity not found.' }, 400);
       }
 
+      let existingWechatIdForDiscord = null;
+      try {
+        const discordHashesForLookup = await dualHashSensitive(env, 'discord_id', discordId);
+        existingWechatIdForDiscord = await findVerifiedWechatIdByIdentityHashes(env, 'discord_id', discordHashesForLookup);
+      } catch (error) {
+        logServerError('discord_existing_wechat_lookup', error);
+      }
+
       let cachedVerification;
       try {
         cachedVerification = await getCachedDiscordVerification(env, discordId);
@@ -1769,6 +1822,7 @@ async function handleRequest(request, env, ctx) {
           discord_name: discordName,
           avatar: userAvatar,
           cached: true,
+          existing_wechat_id: existingWechatIdForDiscord,
         });
       }
 
@@ -1807,6 +1861,7 @@ async function handleRequest(request, env, ctx) {
         discord_name: discordName,
         avatar: userAvatar,
         cached: false,
+        existing_wechat_id: existingWechatIdForDiscord,
       });
     }
 
@@ -1972,6 +2027,14 @@ async function handleRequest(request, env, ctx) {
         return jsonResponse({ success: false, message: 'GitHub identity not found.' }, 400);
       }
 
+      let existingWechatIdForGithub = null;
+      try {
+        const githubHashesForLookup = await dualHashSensitive(env, 'github_id', githubId);
+        existingWechatIdForGithub = await findVerifiedWechatIdByIdentityHashes(env, 'github_id', githubHashesForLookup);
+      } catch (error) {
+        logServerError('github_existing_wechat_lookup', error);
+      }
+
       let cachedVerification;
       try {
         cachedVerification = await getCachedGithubVerification(env, githubId);
@@ -1986,6 +2049,7 @@ async function handleRequest(request, env, ctx) {
           avatar: userAvatar,
           matched_email_domain: cachedVerification.matched_email_domain,
           cached: true,
+          existing_wechat_id: existingWechatIdForGithub,
         });
       }
 
@@ -2019,6 +2083,7 @@ async function handleRequest(request, env, ctx) {
         avatar: userAvatar,
         matched_email_domain: matchedDomain,
         cached: false,
+        existing_wechat_id: existingWechatIdForGithub,
       });
     }
 
