@@ -94,7 +94,7 @@ async function sha256Hex(input) {
     .join('');
 }
 
-/** Hash sensitive data before storage. Uses SENSITIVE_DATA_HASH_SECRET; same value + field yields same hash for uniqueness. Returns null for empty value. */
+/** Legacy v1 hash: SHA-256(secret + field + ':' + value). Kept only as a comparator for lazy migration to v2. New writes should use hmacSensitive. */
 async function hashSensitive(env, field, value) {
   if (value == null || String(value).trim() === '') return null;
   const secret = env.SENSITIVE_DATA_HASH_SECRET;
@@ -113,6 +113,59 @@ async function hmacSha256Raw(key, message) {
   );
   const signature = await crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(message));
   return new Uint8Array(signature);
+}
+
+/** v2 hash: HMAC-SHA-256(key=SENSITIVE_DATA_HASH_SECRET, msg=field+':'+value). Returns 'v2:' + hex. Null for empty value. */
+async function hmacSensitive(env, field, value) {
+  if (value == null || String(value).trim() === '') return null;
+  const secret = env.SENSITIVE_DATA_HASH_SECRET;
+  if (!secret) throw new Error('SENSITIVE_DATA_HASH_SECRET is required for hashing sensitive data.');
+  const keyBytes = new TextEncoder().encode(String(secret));
+  const sig = await hmacSha256Raw(keyBytes, field + ':' + String(value).trim());
+  return 'v2:' + Array.from(sig, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Compute both v1 (legacy SHA-256) and v2 (HMAC) hashes for a value. Used at every lookup site so old and new rows can both be matched during migration. */
+async function dualHashSensitive(env, field, value) {
+  const v1 = await hashSensitive(env, field, value);
+  const v2 = await hmacSensitive(env, field, value);
+  return { v1, v2 };
+}
+
+const HASHED_ACCOUNT_COLUMNS = new Set(['email', 'student_id', 'student_name', 'discord_id', 'github_id']);
+
+/** Replace a row's v1 hash with the v2 hash after a successful lookup matched on v1. Column is allowlist-checked to keep the dynamic identifier safe. */
+async function lazyUpgradeAccountColumn(env, column, wechatId, v2Hash) {
+  if (!HASHED_ACCOUNT_COLUMNS.has(column) || !v2Hash || !wechatId) return;
+  try {
+    await execRun(
+      env,
+      `UPDATE accounts SET ${column} = ? WHERE wechat_id = ? AND ${column} IS NOT NULL AND ${column} != ?`,
+      [v2Hash, wechatId, v2Hash]
+    );
+  } catch (error) {
+    logServerError('lazy_upgrade_account', error, { column, wechatId });
+  }
+}
+
+/** Encode {v1, v2} as a single TEXT value for short-lived tables (adfs_verification_codes) that can't take a schema change. Format: 'v1hex|v2:hex'. Empty halves allowed. */
+function encodeDualHash(hashes) {
+  if (!hashes) return null;
+  const v1 = hashes.v1 || '';
+  const v2 = hashes.v2 || '';
+  if (!v1 && !v2) return null;
+  return `${v1}|${v2}`;
+}
+
+/** Decode a stored dual-hash TEXT value. Accepts legacy bare-hex (treated as v1 only) so pre-migration rows still read correctly. */
+function decodeDualHash(stored) {
+  if (stored == null) return { v1: null, v2: null };
+  const s = String(stored);
+  if (s.includes('|')) {
+    const [v1Part, v2Part] = s.split('|', 2);
+    return { v1: v1Part || null, v2: v2Part || null };
+  }
+  return { v1: s, v2: null };
 }
 
 /** Base64url encode bytes (no padding, URL-safe). Used for JWT. */
@@ -457,24 +510,53 @@ async function resolveTrustedDiscordMembership(env, discordId) {
 }
 
 async function getCachedDiscordVerification(env, plainDiscordId) {
-  const hashedId = await hashSensitive(env, 'discord_id', plainDiscordId);
-  if (!hashedId) return null;
-  return queryFirst(
+  const { v1, v2 } = await dualHashSensitive(env, 'discord_id', plainDiscordId);
+  if (!v1 && !v2) return null;
+
+  const row = await queryFirst(
     env,
     `
       SELECT discord_id, discord_name, guild_id, role_id
       FROM discord_verified_identities
-      WHERE discord_id = ?
+      WHERE discord_id IN (?, ?)
       LIMIT 1
     `,
-    [hashedId]
+    [v2, v1]
   );
+  if (!row) return null;
+
+  if (v2 && v1 && row.discord_id === v1) {
+    try {
+      await execRun(env, 'DELETE FROM discord_verified_identities WHERE discord_id = ?', [v1]);
+      await execRun(
+        env,
+        `
+          INSERT INTO discord_verified_identities (discord_id, discord_name, guild_id, role_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+          ON CONFLICT(discord_id) DO UPDATE SET
+            discord_name = excluded.discord_name,
+            guild_id = excluded.guild_id,
+            role_id = excluded.role_id,
+            updated_at = datetime('now')
+        `,
+        [v2, row.discord_name, row.guild_id, row.role_id]
+      );
+      row.discord_id = v2;
+    } catch (error) {
+      logServerError('discord_lazy_upgrade', error);
+    }
+  }
+  return row;
 }
 
 async function cacheDiscordVerification(env, discordId, discordName, guildId, roleId) {
-  const hashedId = await hashSensitive(env, 'discord_id', discordId);
-  const hashedName = await hashSensitive(env, 'discord_name', discordName || '');
-  if (!hashedId) return;
+  const idHashes = await dualHashSensitive(env, 'discord_id', discordId);
+  const nameV2 = await hmacSensitive(env, 'discord_name', discordName || '');
+  if (!idHashes.v2) return;
+
+  if (idHashes.v1 && idHashes.v1 !== idHashes.v2) {
+    await execRun(env, 'DELETE FROM discord_verified_identities WHERE discord_id = ?', [idHashes.v1]);
+  }
 
   await execRun(
     env,
@@ -487,7 +569,7 @@ async function cacheDiscordVerification(env, discordId, discordName, guildId, ro
         role_id = excluded.role_id,
         updated_at = datetime('now')
     `,
-    [hashedId, hashedName, guildId, roleId]
+    [idHashes.v2, nameV2, guildId, roleId]
   );
 }
 
@@ -637,24 +719,52 @@ async function resolveGithubAllowedDomain(env, accessToken) {
 }
 
 async function getCachedGithubVerification(env, plainGithubId) {
-  const hashedId = await hashSensitive(env, 'github_id', plainGithubId);
-  if (!hashedId) return null;
-  return queryFirst(
+  const { v1, v2 } = await dualHashSensitive(env, 'github_id', plainGithubId);
+  if (!v1 && !v2) return null;
+
+  const row = await queryFirst(
     env,
     `
       SELECT github_id, github_login, matched_email_domain
       FROM github_verified_identities
-      WHERE github_id = ?
+      WHERE github_id IN (?, ?)
       LIMIT 1
     `,
-    [hashedId]
+    [v2, v1]
   );
+  if (!row) return null;
+
+  if (v2 && v1 && row.github_id === v1) {
+    try {
+      await execRun(env, 'DELETE FROM github_verified_identities WHERE github_id = ?', [v1]);
+      await execRun(
+        env,
+        `
+          INSERT INTO github_verified_identities (github_id, github_login, matched_email_domain, created_at, updated_at)
+          VALUES (?, ?, ?, datetime('now'), datetime('now'))
+          ON CONFLICT(github_id) DO UPDATE SET
+            github_login = excluded.github_login,
+            matched_email_domain = excluded.matched_email_domain,
+            updated_at = datetime('now')
+        `,
+        [v2, row.github_login, row.matched_email_domain]
+      );
+      row.github_id = v2;
+    } catch (error) {
+      logServerError('github_lazy_upgrade', error);
+    }
+  }
+  return row;
 }
 
 async function cacheGithubVerification(env, githubId, githubLogin, matchedDomain) {
-  const hashedId = await hashSensitive(env, 'github_id', githubId);
-  const hashedLogin = await hashSensitive(env, 'github_login', githubLogin || '');
-  if (!hashedId) return;
+  const idHashes = await dualHashSensitive(env, 'github_id', githubId);
+  const loginV2 = await hmacSensitive(env, 'github_login', githubLogin || '');
+  if (!idHashes.v2) return;
+
+  if (idHashes.v1 && idHashes.v1 !== idHashes.v2) {
+    await execRun(env, 'DELETE FROM github_verified_identities WHERE github_id = ?', [idHashes.v1]);
+  }
 
   await execRun(
     env,
@@ -666,7 +776,7 @@ async function cacheGithubVerification(env, githubId, githubLogin, matchedDomain
         matched_email_domain = excluded.matched_email_domain,
         updated_at = datetime('now')
     `,
-    [hashedId, hashedLogin, matchedDomain]
+    [idHashes.v2, loginV2, matchedDomain]
   );
 }
 
@@ -875,7 +985,7 @@ async function handleRequest(request, env, ctx) {
     if (method === 'GET' && verifyMatch) {
       const wechatId = decodeURIComponent(verifyMatch[1]);
       await execRun(env, "UPDATE stats SET value = value + 1 WHERE key = 'account_queries'");
-      const account = await queryFirst(env, 'SELECT wechat_id, verified_status, verification_method, verification_time, reverified_at, manual_status, manual_reason, manual_admin, manual_time FROM accounts WHERE wechat_id = ?', [wechatId]);
+      const account = await queryFirst(env, 'SELECT wechat_id, verified_status, verification_method, verification_time, reverified_at, manual_status, manual_reason, manual_admin, manual_time, email, student_id, student_name, discord_id, github_id FROM accounts WHERE wechat_id = ?', [wechatId]);
       const blacklistRecord = await getActiveBlacklistRecord(env, wechatId);
       const blacklist = buildBlacklistPayload(blacklistRecord);
 
@@ -889,6 +999,18 @@ async function handleRequest(request, env, ctx) {
       }
 
       if (account) {
+        const hashedCols = ['email', 'student_id', 'student_name', 'discord_id', 'github_id'];
+        let anyHashed = false;
+        let anyLegacy = false;
+        for (const col of hashedCols) {
+          const val = account[col];
+          if (val == null) continue;
+          anyHashed = true;
+          if (!String(val).startsWith('v2:')) anyLegacy = true;
+          delete account[col];
+        }
+        account.hash_version = anyHashed ? (anyLegacy ? 'sha256' : 'hmac-sha256') : null;
+
         if(account['verification_method'] != "Manual") {
           delete account['manual_status'];
           delete account['manual_reason'];
@@ -925,11 +1047,11 @@ async function handleRequest(request, env, ctx) {
         return jsonResponse({ success: false, message: 'student_id is required.' }, 400);
       }
 
-      let hashStudentId, hashStudentName, hashEmail;
+      let studentIdDual, studentNameDual, emailDual;
       try {
-        hashStudentId = await hashSensitive(env, 'student_id', student_id);
-        hashStudentName = await hashSensitive(env, 'student_name', student_name || '');
-        hashEmail = await hashSensitive(env, 'email', email ? normalizeEmail(email) : '');
+        studentIdDual = encodeDualHash(await dualHashSensitive(env, 'student_id', student_id));
+        studentNameDual = encodeDualHash(await dualHashSensitive(env, 'student_name', student_name || ''));
+        emailDual = encodeDualHash(await dualHashSensitive(env, 'email', email ? normalizeEmail(email) : ''));
       } catch (error) {
         return genericError('adfs_create_code_hash', error, 500, 'Server configuration error.');
       }
@@ -944,7 +1066,7 @@ async function handleRequest(request, env, ctx) {
           INSERT INTO adfs_verification_codes (code_hash, student_id, student_name, email, expires_at, created_at)
           VALUES (?, ?, ?, ?, ?, datetime('now'))
         `,
-        [codeHash, hashStudentId, hashStudentName, hashEmail, expiresAt]
+        [codeHash, studentIdDual, studentNameDual, emailDual, expiresAt]
       );
 
       return jsonResponse({ success: true, code });
@@ -963,7 +1085,7 @@ async function handleRequest(request, env, ctx) {
         return blacklistResponse;
       }
 
-      let finalStudentId, finalStudentName, finalEmail;
+      let studentIdHashes, studentNameHashes, emailHashes;
 
       if (code) {
         const codeHash = await sha256Hex(String(code));
@@ -979,9 +1101,9 @@ async function handleRequest(request, env, ctx) {
           await execRun(env, 'DELETE FROM adfs_verification_codes WHERE code_hash = ?', [codeHash]);
           return jsonResponse({ success: false, message: 'ADFS Verification has expired, please try again or contact support.' }, 400);
         }
-        finalStudentId = row.student_id;
-        finalStudentName = row.student_name || null;
-        finalEmail = row.email || null;
+        studentIdHashes = decodeDualHash(row.student_id);
+        studentNameHashes = decodeDualHash(row.student_name);
+        emailHashes = decodeDualHash(row.email);
         await execRun(env, 'DELETE FROM adfs_verification_codes WHERE code_hash = ?', [codeHash]);
       } else {
         return jsonResponse({ success: false, message: 'code is required.' }, 400);
@@ -1020,22 +1142,31 @@ async function handleRequest(request, env, ctx) {
         return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
       }
 
-      const existingByStudentId = finalStudentId
-        ? await queryFirst(env, 'SELECT wechat_id FROM accounts WHERE wechat_id != ? AND student_id = ? LIMIT 1', [wechat_id, finalStudentId])
+      const existingByStudentId = studentIdHashes.v2
+        ? await queryFirst(env, 'SELECT wechat_id, student_id FROM accounts WHERE wechat_id != ? AND student_id IN (?, ?) LIMIT 1', [wechat_id, studentIdHashes.v1, studentIdHashes.v2])
         : null;
       if (existingByStudentId) {
+        if (existingByStudentId.student_id === studentIdHashes.v1) {
+          await lazyUpgradeAccountColumn(env, 'student_id', existingByStudentId.wechat_id, studentIdHashes.v2);
+        }
         return jsonResponse({ success: false, message: 'This student ID is already linked to another account.' }, 400);
       }
-      const existingByStudentName = finalStudentName
-        ? await queryFirst(env, 'SELECT wechat_id FROM accounts WHERE wechat_id != ? AND student_name = ? LIMIT 1', [wechat_id, finalStudentName])
+      const existingByStudentName = studentNameHashes.v2
+        ? await queryFirst(env, 'SELECT wechat_id, student_name FROM accounts WHERE wechat_id != ? AND student_name IN (?, ?) LIMIT 1', [wechat_id, studentNameHashes.v1, studentNameHashes.v2])
         : null;
       if (existingByStudentName) {
+        if (existingByStudentName.student_name === studentNameHashes.v1) {
+          await lazyUpgradeAccountColumn(env, 'student_name', existingByStudentName.wechat_id, studentNameHashes.v2);
+        }
         return jsonResponse({ success: false, message: 'This name is already linked to another account.' }, 400);
       }
-      const existingByEmail = finalEmail
-        ? await queryFirst(env, 'SELECT wechat_id FROM accounts WHERE wechat_id != ? AND email = ? LIMIT 1', [wechat_id, finalEmail])
+      const existingByEmail = emailHashes.v2
+        ? await queryFirst(env, 'SELECT wechat_id, email FROM accounts WHERE wechat_id != ? AND email IN (?, ?) LIMIT 1', [wechat_id, emailHashes.v1, emailHashes.v2])
         : null;
       if (existingByEmail) {
+        if (existingByEmail.email === emailHashes.v1) {
+          await lazyUpgradeAccountColumn(env, 'email', existingByEmail.wechat_id, emailHashes.v2);
+        }
         return jsonResponse({ success: false, message: 'This email is already linked to another account.' }, 400);
       }
 
@@ -1052,7 +1183,7 @@ async function handleRequest(request, env, ctx) {
             student_name = excluded.student_name,
             email = excluded.email
         `,
-        [wechat_id, finalStudentId, finalStudentName, finalEmail]
+        [wechat_id, studentIdHashes.v2, studentNameHashes.v2, emailHashes.v2]
       );
 
       return jsonResponse({ success: true, message: 'Verified successfully via ADFS.' });
@@ -1090,26 +1221,29 @@ async function handleRequest(request, env, ctx) {
         if (await checkVerified(env, wechat_id)) {
           return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
         }
-        let emailHash;
+        let emailHashes;
         try {
-          emailHash = await hashSensitive(env, 'email', normalizedEmail);
+          emailHashes = await dualHashSensitive(env, 'email', normalizedEmail);
         } catch (error) {
           return genericError('verify_email_hash', error, 500, 'Server configuration error.');
         }
         const emailUsedByOtherWechat = await queryFirst(
           env,
           `
-            SELECT wechat_id
+            SELECT wechat_id, email
             FROM accounts
-            WHERE email = ?
+            WHERE email IN (?, ?)
               AND verification_method = 'Email'
               AND wechat_id <> ?
             LIMIT 1
           `,
-          [emailHash, wechat_id]
+          [emailHashes.v1, emailHashes.v2, wechat_id]
         );
 
         if (emailUsedByOtherWechat) {
+          if (emailUsedByOtherWechat.email === emailHashes.v1) {
+            await lazyUpgradeAccountColumn(env, 'email', emailUsedByOtherWechat.wechat_id, emailHashes.v2);
+          }
           return jsonResponse(
             {
               success: false,
@@ -1257,7 +1391,7 @@ async function handleRequest(request, env, ctx) {
 
       let emailHashForStorage;
       try {
-        emailHashForStorage = await hashSensitive(env, 'email', normalizedEmail);
+        emailHashForStorage = await hmacSensitive(env, 'email', normalizedEmail);
       } catch (error) {
         return genericError('verify_email_store_hash', error, 500, 'Server configuration error.');
       }
@@ -1378,8 +1512,10 @@ async function handleRequest(request, env, ctx) {
       }
 
       let verifiedDiscord;
+      let discordIdHashes;
       try {
         verifiedDiscord = await getCachedDiscordVerification(env, String(discord_id));
+        discordIdHashes = await dualHashSensitive(env, 'discord_id', String(discord_id));
       } catch (error) {
         return genericError('discord_connect_cache_lookup', error, 500, 'Server configuration error.');
       }
@@ -1396,15 +1532,18 @@ async function handleRequest(request, env, ctx) {
       const connectedElsewhere = await queryFirst(
         env,
         `
-          SELECT wechat_id
+          SELECT wechat_id, discord_id
           FROM accounts
-          WHERE discord_id = ? AND wechat_id <> ? AND verified_status = 1
+          WHERE discord_id IN (?, ?) AND wechat_id <> ? AND verified_status = 1
           LIMIT 1
         `,
-        [verifiedDiscord.discord_id, wechat_id]
+        [discordIdHashes.v1, discordIdHashes.v2, wechat_id]
       );
 
       if (connectedElsewhere) {
+        if (connectedElsewhere.discord_id === discordIdHashes.v1) {
+          await lazyUpgradeAccountColumn(env, 'discord_id', connectedElsewhere.wechat_id, discordIdHashes.v2);
+        }
         return jsonResponse(
           {
             success: false,
@@ -1459,7 +1598,7 @@ async function handleRequest(request, env, ctx) {
             verification_time = datetime('now'),
             discord_id = excluded.discord_id
         `,
-        [wechat_id, verifiedDiscord.discord_id]
+        [wechat_id, discordIdHashes.v2]
       );
 
       return jsonResponse({
@@ -1563,8 +1702,10 @@ async function handleRequest(request, env, ctx) {
       }
 
       let verifiedGithub;
+      let githubIdHashes;
       try {
         verifiedGithub = await getCachedGithubVerification(env, String(github_id));
+        githubIdHashes = await dualHashSensitive(env, 'github_id', String(github_id));
       } catch (error) {
         return genericError('github_connect_cache_lookup', error, 500, 'Server configuration error.');
       }
@@ -1581,15 +1722,18 @@ async function handleRequest(request, env, ctx) {
       const connectedElsewhere = await queryFirst(
         env,
         `
-          SELECT wechat_id
+          SELECT wechat_id, github_id
           FROM accounts
-          WHERE github_id = ? AND wechat_id <> ? AND verified_status = 1
+          WHERE github_id IN (?, ?) AND wechat_id <> ? AND verified_status = 1
           LIMIT 1
         `,
-        [verifiedGithub.github_id, wechat_id]
+        [githubIdHashes.v1, githubIdHashes.v2, wechat_id]
       );
 
       if (connectedElsewhere) {
+        if (connectedElsewhere.github_id === githubIdHashes.v1) {
+          await lazyUpgradeAccountColumn(env, 'github_id', connectedElsewhere.wechat_id, githubIdHashes.v2);
+        }
         return jsonResponse(
           {
             success: false,
@@ -1644,7 +1788,7 @@ async function handleRequest(request, env, ctx) {
             verification_time = datetime('now'),
             github_id = excluded.github_id
         `,
-        [wechat_id, verifiedGithub.github_id]
+        [wechat_id, githubIdHashes.v2]
       );
 
       return jsonResponse({
