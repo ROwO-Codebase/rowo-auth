@@ -10,7 +10,7 @@ export default function AdfsCallback() {
   const [status, setStatus] = useState<'input_wechat' | 'verifying' | 'success' | 'error'>('input_wechat');
   const [message, setMessage] = useState('');
   const [wechatId, setWechatId] = useState('');
-  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean } | null>(null);
+  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean; alreadyLinkedToRowo: boolean } | null>(null);
 
   const code = searchParams.get('code');
 
@@ -45,6 +45,7 @@ export default function AdfsCallback() {
             wechatId: data.wechat_id,
             method: 'ADFS',
             reverified: Boolean(data.reverified),
+            alreadyLinkedToRowo: Boolean(data.already_linked_to_rowo),
           });
         }
       } else {
@@ -69,6 +70,7 @@ export default function AdfsCallback() {
           wechatId={postVerify.wechatId}
           method={postVerify.method}
           reverified={postVerify.reverified}
+          alreadyLinkedToRowo={postVerify.alreadyLinkedToRowo}
         />
       </div>
     );

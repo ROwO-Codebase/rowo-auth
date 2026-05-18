@@ -332,6 +332,16 @@ async function issueBindToken(env, wechatId, method) {
   return { token, expiresAt: new Date(exp * 1000).toISOString() };
 }
 
+async function isWechatIdLinkedToRowoAccount(env, wechatId) {
+  if (!wechatId) return false;
+  const row = await queryFirst(
+    env,
+    'SELECT id FROM user_accounts WHERE wechat_id = ? LIMIT 1',
+    [String(wechatId)]
+  );
+  return Boolean(row);
+}
+
 async function consumeBindToken(env, token) {
   if (!env.ROWO_AUTH_JWT_SECRET) return null;
   const payload = await verifyRowoJwt(env, token, 'bind');
@@ -1385,6 +1395,7 @@ async function handleRequest(request, env, ctx) {
             [studentIdHashes.v2, studentNameHashes.v2, emailHashes.v2, wechat_id]
           );
           const bind = await issueBindToken(env, wechat_id, 'ADFS');
+          const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
           await execRun(
             env,
@@ -1401,6 +1412,7 @@ async function handleRequest(request, env, ctx) {
             wechat_id,
             bind_token: bind.token,
             bind_token_expires_at: bind.expiresAt,
+            already_linked_to_rowo: alreadyLinkedToRowo,
           });
         }
         return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
@@ -1451,12 +1463,14 @@ async function handleRequest(request, env, ctx) {
       );
 
       const bind = await issueBindToken(env, wechat_id, 'ADFS');
+      const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
       return jsonResponse({
         success: true,
         message: 'Verified successfully via ADFS.',
         wechat_id,
         bind_token: bind.token,
         bind_token_expires_at: bind.expiresAt,
+        already_linked_to_rowo: alreadyLinkedToRowo,
       });
     }
 
@@ -1654,6 +1668,7 @@ async function handleRequest(request, env, ctx) {
             [reverifyEmailDual.v2, wechat_id]
           );
           const bind = await issueBindToken(env, wechat_id, 'Email');
+          const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
           await execRun(
             env,
@@ -1671,6 +1686,7 @@ async function handleRequest(request, env, ctx) {
             wechat_id,
             bind_token: bind.token,
             bind_token_expires_at: bind.expiresAt,
+            already_linked_to_rowo: alreadyLinkedToRowo,
           });
         }
         return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
@@ -1703,12 +1719,14 @@ async function handleRequest(request, env, ctx) {
       );
 
       const bind = await issueBindToken(env, wechat_id, 'Email');
+      const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
       return jsonResponse({
         success: true,
         message: 'Verified successfully via Email.',
         wechat_id,
         bind_token: bind.token,
         bind_token_expires_at: bind.expiresAt,
+        already_linked_to_rowo: alreadyLinkedToRowo,
       });
     }
 
@@ -1874,6 +1892,7 @@ async function handleRequest(request, env, ctx) {
             [discordIdHashes.v2, wechat_id]
           );
           const bind = await issueBindToken(env, wechat_id, 'Discord');
+          const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
           await execRun(
             env,
@@ -1890,6 +1909,7 @@ async function handleRequest(request, env, ctx) {
             wechat_id,
             bind_token: bind.token,
             bind_token_expires_at: bind.expiresAt,
+            already_linked_to_rowo: alreadyLinkedToRowo,
           });
         }
         return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
@@ -1910,6 +1930,7 @@ async function handleRequest(request, env, ctx) {
       );
 
       const bind = await issueBindToken(env, wechat_id, 'Discord');
+      const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
       return jsonResponse({
         success: true,
         message: 'Discord account connected and WeChat ID verified.',
@@ -1917,6 +1938,7 @@ async function handleRequest(request, env, ctx) {
         wechat_id,
         bind_token: bind.token,
         bind_token_expires_at: bind.expiresAt,
+        already_linked_to_rowo: alreadyLinkedToRowo,
       });
     }
 
@@ -2082,6 +2104,7 @@ async function handleRequest(request, env, ctx) {
             [githubIdHashes.v2, wechat_id]
           );
           const bind = await issueBindToken(env, wechat_id, 'GitHub');
+          const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
           await execRun(
             env,
@@ -2098,6 +2121,7 @@ async function handleRequest(request, env, ctx) {
             wechat_id,
             bind_token: bind.token,
             bind_token_expires_at: bind.expiresAt,
+            already_linked_to_rowo: alreadyLinkedToRowo,
           });
         }
         return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
@@ -2118,6 +2142,7 @@ async function handleRequest(request, env, ctx) {
       );
 
       const bind = await issueBindToken(env, wechat_id, 'GitHub');
+      const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
       return jsonResponse({
         success: true,
         message: 'GitHub account connected and WeChat ID verified.',
@@ -2125,6 +2150,7 @@ async function handleRequest(request, env, ctx) {
         wechat_id,
         bind_token: bind.token,
         bind_token_expires_at: bind.expiresAt,
+        already_linked_to_rowo: alreadyLinkedToRowo,
       });
     }
 
@@ -2721,12 +2747,14 @@ async function handleRequest(request, env, ctx) {
           [auth.admin.username, wechatId]
         );
         const bind = await issueBindToken(env, wechatId, 'Manual');
+        const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechatId);
         return jsonResponse({
           success: true,
           message: 'Application approved.',
           wechat_id: wechatId,
           bind_token: bind.token,
           bind_token_expires_at: bind.expiresAt,
+          already_linked_to_rowo: alreadyLinkedToRowo,
         });
       } else if (action === 'reject') {
         await execRun(

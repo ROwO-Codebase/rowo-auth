@@ -24,7 +24,7 @@ export default function DiscordCallback() {
   const [message, setMessage] = useState('Verifying your Discord identity...');
   const [discordData, setDiscordData] = useState<{ discord_id: string; username: string; avatar?: string } | null>(null);
   const [wechatId, setWechatId] = useState('');
-  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean } | null>(null);
+  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean; alreadyLinkedToRowo: boolean } | null>(null);
 
   const code = searchParams.get('code');
 
@@ -101,6 +101,7 @@ export default function DiscordCallback() {
             wechatId: data.wechat_id,
             method: 'Discord',
             reverified: Boolean(data.reverified),
+            alreadyLinkedToRowo: Boolean(data.already_linked_to_rowo),
           });
         }
       } else {
@@ -125,6 +126,7 @@ export default function DiscordCallback() {
           wechatId={postVerify.wechatId}
           method={postVerify.method}
           reverified={postVerify.reverified}
+          alreadyLinkedToRowo={postVerify.alreadyLinkedToRowo}
         />
       </div>
     );

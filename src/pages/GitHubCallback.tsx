@@ -13,7 +13,7 @@ export default function GitHubCallback() {
   const [message, setMessage] = useState('Verifying your GitHub identity...');
   const [githubData, setGithubData] = useState<{ github_id: string; login: string; avatar?: string; matched_email_domain?: string } | null>(null);
   const [wechatId, setWechatId] = useState('');
-  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean } | null>(null);
+  const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean; alreadyLinkedToRowo: boolean } | null>(null);
 
   const code = searchParams.get('code');
 
@@ -91,6 +91,7 @@ export default function GitHubCallback() {
             wechatId: data.wechat_id,
             method: 'GitHub',
             reverified: Boolean(data.reverified),
+            alreadyLinkedToRowo: Boolean(data.already_linked_to_rowo),
           });
         }
       } else {
@@ -115,6 +116,7 @@ export default function GitHubCallback() {
           wechatId={postVerify.wechatId}
           method={postVerify.method}
           reverified={postVerify.reverified}
+          alreadyLinkedToRowo={postVerify.alreadyLinkedToRowo}
         />
       </div>
     );
