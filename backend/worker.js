@@ -1004,9 +1004,10 @@ async function handleRequest(request, env, ctx) {
         let anyLegacy = false;
         for (const col of hashedCols) {
           const val = account[col];
-          if (val == null) continue;
-          anyHashed = true;
-          if (!String(val).startsWith('v2:')) anyLegacy = true;
+          if (val != null) {
+            anyHashed = true;
+            if (!String(val).startsWith('v2:')) anyLegacy = true;
+          }
           delete account[col];
         }
         account.hash_version = anyHashed ? (anyLegacy ? 'sha256' : 'hmac-sha256') : null;
