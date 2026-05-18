@@ -27,6 +27,7 @@ interface AccountData {
   manual_admin?: string;
   manual_time?: string;
   reverified_at?: string;
+  hash_version?: 'sha256' | 'hmac-sha256' | null;
 }
 
 export default function LandingPage() {
@@ -202,6 +203,24 @@ export default function LandingPage() {
                             Revoked
                           </span>
                         )}
+                        {result.account.hash_version === 'hmac-sha256' && (
+                          <span
+                            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800"
+                            title="Your account data is hashed with HMAC-SHA-256."
+                          >
+                            <Shield className="w-3.5 h-3.5" />
+                            HMAC-SHA-256
+                          </span>
+                        )}
+                        {result.account.hash_version === 'sha256' && (
+                          <span
+                            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800"
+                            title="Re-verify your account to upgrade to HMAC-SHA-256."
+                          >
+                            <AlertTriangle className="w-3.5 h-3.5" />
+                            SHA-256
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -259,6 +278,25 @@ export default function LandingPage() {
                         </div>
                       )}
                     </div>
+
+                    {result.account.hash_version === 'sha256' && (
+                      <div className="mt-6 bg-orange-50 border-l-4 border-orange-500 p-4 rounded-r-lg flex items-start gap-3">
+                        <AlertTriangle className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
+                        <div className="flex-1 min-w-0">
+                          <h3 className="text-sm font-bold text-orange-800">Legacy encryption (SHA-256)</h3>
+                          <p className="text-sm text-orange-700 mt-1">
+                            Your account data is hashed with the legacy SHA-256 algorithm.{' '}
+                            <Link
+                              to={`/verify?wechat_id=${encodeURIComponent(result.account.wechat_id)}`}
+                              className="font-semibold underline hover:text-orange-900"
+                            >
+                              Re-verify your account
+                            </Link>{' '}
+                            to upgrade to HMAC-SHA-256 for stronger security.
+                          </p>
+                        </div>
+                      </div>
+                    )}
 
                     {result.info && result.info.length > 0 && (
                       <div className="mt-8 space-y-4">
