@@ -62,13 +62,29 @@ export default function PrivacyPage() {
             How Data Is Stored
           </h2>
           <p className="text-slate-600 leading-relaxed mb-4">
-            We use SHA-256 based keyed hashing for sensitive values in core account storage (for example student identity fields and email/Discord identity links used for deduplication).
+            We use <strong>HMAC-SHA-256</strong> to hash sensitive identifiers — including student IDs, student names, email addresses, and Discord/GitHub account identifiers used for deduplication — before they are written to our core account database. Raw values are never persisted in long-term storage.
           </p>
+
+          <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 mb-4">
+            <h3 className="text-sm font-bold text-indigo-900 mb-2">About HMAC-SHA-256</h3>
+            <p className="text-sm text-indigo-900/80 leading-relaxed">
+              HMAC-SHA-256 is a keyed-hash message authentication code defined in RFC 2104. It combines the SHA-256 cryptographic hash function with a secret key held only on our server, producing a 256-bit fingerprint of the input. Without the secret key, an attacker who obtains a database dump cannot brute-force the original values from the hash, even for low-entropy inputs like email addresses or student IDs. Because the function is deterministic for a given key and input, we can still detect duplicate identities and enforce uniqueness without ever retaining the raw data.
+            </p>
+          </div>
+
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 mb-4">
+            <h3 className="text-sm font-bold text-emerald-900 mb-2">Migration to HMAC-SHA-256</h3>
+            <p className="text-sm text-emerald-900/80 leading-relaxed">
+              Historical accounts were hashed with a SHA-256 plus server-side pepper construction. We are migrating all stored hashes to HMAC-SHA-256 lazily — when an account is touched by a verification or re-authentication flow, its stored hash is automatically rewritten to the new format. You can check the status of your own account on the account query page: a green shield badge indicates HMAC-SHA-256, while an orange warning badge indicates the legacy SHA-256 hash, and offers a one-click re-verification to complete the upgrade.
+            </p>
+          </div>
+
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
             <h3 className="text-sm font-bold text-slate-900 mb-2">Important storage notes</h3>
             <ul className="space-y-2 text-sm text-slate-600">
               <li>- Some operational fields remain plaintext by design, including WeChat IDs and moderation/admin remarks.</li>
               <li>- Pending email verification rows store plaintext normalized email until completion or expiration handling.</li>
+              <li>- Short-lived verification codes and rename tokens are stored as plain SHA-256 of high-entropy random values; they expire within ten minutes.</li>
               <li>- We do not return internal exception details to API clients; detailed errors stay in server-side logs.</li>
             </ul>
           </div>
