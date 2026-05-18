@@ -49,43 +49,6 @@ function generateAdfsCode() {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-function generateRenameToken() {
-  const bytes = new Uint8Array(24);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-const RENAME_TOKEN_TTL_MS = 10 * 60 * 1000;
-
-async function createRenameToken(env, wechatId) {
-  const token = generateRenameToken();
-  const tokenHash = await sha256Hex(token);
-  const expiresAt = new Date(Date.now() + RENAME_TOKEN_TTL_MS).toISOString();
-  await execRun(
-    env,
-    "INSERT INTO rename_tokens (token_hash, wechat_id, expires_at, created_at) VALUES (?, ?, ?, datetime('now'))",
-    [tokenHash, wechatId, expiresAt]
-  );
-  return { token, expiresAt };
-}
-
-async function consumeRenameToken(env, token) {
-  const tokenHash = await sha256Hex(String(token));
-  const row = await queryFirst(env, 'SELECT wechat_id, expires_at FROM rename_tokens WHERE token_hash = ?', [tokenHash]);
-  if (!row) return null;
-  if (new Date(row.expires_at) < new Date()) {
-    await execRun(env, 'DELETE FROM rename_tokens WHERE token_hash = ?', [tokenHash]);
-    return null;
-  }
-  await execRun(env, 'DELETE FROM rename_tokens WHERE token_hash = ?', [tokenHash]);
-  return row.wechat_id;
-}
-
-async function invalidateRenameToken(env, token) {
-  const tokenHash = await sha256Hex(String(token));
-  await execRun(env, 'DELETE FROM rename_tokens WHERE token_hash = ?', [tokenHash]);
-}
-
 async function sha256Hex(input) {
   const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input;
   const hash = await crypto.subtle.digest('SHA-256', bytes);
@@ -208,6 +171,268 @@ async function verifyAdfsCreateCodeJwt(env, authHeader) {
   } catch {
     return false;
   }
+}
+
+// ----------------------------------------------------------------------------
+// ROwO Account: PBKDF2 password hashing + HS256 JWTs (sessions and bind tokens).
+// See plans/add-a-rowo-account-humming-anchor.md.
+// ----------------------------------------------------------------------------
+
+const PBKDF2_ITERATIONS = 310_000;
+const PBKDF2_SALT_BYTES = 16;
+const PBKDF2_HASH_BYTES = 32;
+const USER_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+const BIND_TOKEN_TTL_SECONDS = 10 * 60;
+const LOGIN_ATTEMPTS_PER_MINUTE = 10;
+const RESERVED_USERNAMES = new Set([
+  'admin', 'root', 'system', 'api', 'support', 'security', 'rowo', 'null', 'undefined', 'me',
+]);
+// Placeholder hash used to keep timing flat when a username does not exist.
+// Verify against this on user-miss; PBKDF2 work is identical to the real path.
+const DUMMY_PASSWORD_HASH = 'v1:pbkdf2-sha256:310000:AAAAAAAAAAAAAAAAAAAAAA==:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+
+function bytesToBase64(bytes) {
+  const bin = Array.from(bytes, (b) => String.fromCodePoint(b)).join('');
+  return btoa(bin);
+}
+
+function base64ToBytes(str) {
+  const bin = atob(str);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function randomHex(byteLength) {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
+async function pbkdf2Derive(password, salt, iterations, hashBytes) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+    key,
+    hashBytes * 8
+  );
+  return new Uint8Array(bits);
+}
+
+async function hashPassword(plain) {
+  const salt = crypto.getRandomValues(new Uint8Array(PBKDF2_SALT_BYTES));
+  const hash = await pbkdf2Derive(plain, salt, PBKDF2_ITERATIONS, PBKDF2_HASH_BYTES);
+  return `v1:pbkdf2-sha256:${PBKDF2_ITERATIONS}:${bytesToBase64(salt)}:${bytesToBase64(hash)}`;
+}
+
+async function verifyPassword(plain, stored) {
+  if (typeof stored !== 'string') return false;
+  const parts = stored.split(':');
+  if (parts.length !== 5) return false;
+  const [version, alg, iterStr, saltB64, hashB64] = parts;
+  if (version !== 'v1' || alg !== 'pbkdf2-sha256') return false;
+  const iterations = Number(iterStr);
+  if (!Number.isFinite(iterations) || iterations < 1000) return false;
+  let salt, expected;
+  try {
+    salt = base64ToBytes(saltB64);
+    expected = base64ToBytes(hashB64);
+  } catch {
+    return false;
+  }
+  if (expected.length === 0) return false;
+  const derived = await pbkdf2Derive(plain, salt, iterations, expected.length);
+  return timingSafeEqual(derived, expected);
+}
+
+function getRowoJwtSecret(env) {
+  const secret = env.ROWO_AUTH_JWT_SECRET;
+  if (!secret || typeof secret !== 'string') {
+    throw new Error('ROWO_AUTH_JWT_SECRET is required for ROwO Account auth.');
+  }
+  return secret;
+}
+
+async function signRowoJwt(env, payload) {
+  const secret = getRowoJwtSecret(env);
+  const header = { alg: 'HS256', typ: 'JWT', kid: 'v1' };
+  const headerB64 = base64UrlEncode(new TextEncoder().encode(JSON.stringify(header)));
+  const payloadB64 = base64UrlEncode(new TextEncoder().encode(JSON.stringify(payload)));
+  const signingInput = `${headerB64}.${payloadB64}`;
+  const sig = await hmacSha256Raw(new TextEncoder().encode(secret), signingInput);
+  return `${signingInput}.${base64UrlEncode(sig)}`;
+}
+
+async function verifyRowoJwt(env, token, expectedSub) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  let header, payload;
+  try {
+    header = JSON.parse(base64UrlDecode(parts[0]));
+    payload = JSON.parse(base64UrlDecode(parts[1]));
+  } catch {
+    return null;
+  }
+  if (!header || header.alg !== 'HS256') return null;
+  const secret = getRowoJwtSecret(env);
+  const signingInput = `${parts[0]}.${parts[1]}`;
+  const expectedSig = base64UrlEncode(await hmacSha256Raw(new TextEncoder().encode(secret), signingInput));
+  if (parts[2] !== expectedSig) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (payload.exp != null && typeof payload.exp === 'number' && payload.exp < now) return null;
+  if (payload.nbf != null && typeof payload.nbf === 'number' && payload.nbf > now + 5) return null;
+  if (expectedSub != null && payload.sub !== expectedSub) return null;
+  return payload;
+}
+
+async function issueUserSessionToken(env, userId, usernameDisplay) {
+  const now = Math.floor(Date.now() / 1000);
+  return signRowoJwt(env, {
+    iss: 'rowo-auth',
+    sub: 'session',
+    uid: userId,
+    u: usernameDisplay,
+    iat: now,
+    exp: now + USER_SESSION_TTL_SECONDS,
+  });
+}
+
+async function issueBindToken(env, wechatId, method) {
+  const now = Math.floor(Date.now() / 1000);
+  const exp = now + BIND_TOKEN_TTL_SECONDS;
+  const token = await signRowoJwt(env, {
+    iss: 'rowo-auth',
+    sub: 'bind',
+    wechat_id: String(wechatId),
+    method: String(method || 'unknown'),
+    iat: now,
+    exp,
+    jti: randomHex(16),
+  });
+  return { token, expiresAt: new Date(exp * 1000).toISOString() };
+}
+
+async function consumeBindToken(env, token) {
+  if (!env.ROWO_AUTH_JWT_SECRET) return null;
+  const payload = await verifyRowoJwt(env, token, 'bind');
+  if (!payload) return null;
+  const wechatId = typeof payload.wechat_id === 'string' ? payload.wechat_id.trim() : '';
+  if (!wechatId) return null;
+  return { wechatId, method: payload.method || null };
+}
+
+async function requireUserAuth(request, env) {
+  const authHeader = request.headers.get('authorization') || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (!token) {
+    return { response: jsonResponse({ success: false, message: 'Unauthorized' }, 401) };
+  }
+  let payload;
+  try {
+    payload = await verifyRowoJwt(env, token, 'session');
+  } catch (error) {
+    logServerError('require_user_auth', error);
+    return { response: jsonResponse({ success: false, message: 'Authentication unavailable.' }, 500) };
+  }
+  if (!payload) {
+    return { response: jsonResponse({ success: false, message: 'Invalid or expired session.' }, 401) };
+  }
+  const user = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [payload.uid]);
+  if (!user) {
+    return { response: jsonResponse({ success: false, message: 'Account no longer exists.' }, 401) };
+  }
+  return { user };
+}
+
+function normalizeUsername(input) {
+  return String(input == null ? '' : input).trim().toLowerCase().normalize('NFKC');
+}
+
+function validateUsername(displayInput) {
+  const display = String(displayInput == null ? '' : displayInput).trim();
+  if (!display) return { ok: false, message: 'Username is required.' };
+  if (display.length > 32) return { ok: false, message: 'Username must be at most 32 characters.' };
+  const normalized = normalizeUsername(display);
+  if (!/^[a-z0-9_-]{3,32}$/.test(normalized)) {
+    return { ok: false, message: 'Username must be 3-32 characters: lowercase letters, digits, underscore, or dash.' };
+  }
+  if (RESERVED_USERNAMES.has(normalized)) {
+    return { ok: false, message: 'That username is reserved.' };
+  }
+  return { ok: true, normalized, display };
+}
+
+function validatePassword(input) {
+  const pw = String(input == null ? '' : input);
+  if (pw.length < 10) return { ok: false, message: 'Password must be at least 10 characters.' };
+  if (pw.length > 200) return { ok: false, message: 'Password is too long.' };
+  if (!/[A-Za-z]/.test(pw)) return { ok: false, message: 'Password must include at least one letter.' };
+  if (!/[0-9]/.test(pw)) return { ok: false, message: 'Password must include at least one digit.' };
+  return { ok: true };
+}
+
+function getClientIp(request) {
+  return request.headers.get('cf-connecting-ip')
+    || request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+    || 'unknown';
+}
+
+async function consumeLoginRateLimit(env, bucketKey) {
+  await execRun(
+    env,
+    `
+      INSERT INTO login_rate_limits (bucket_key, attempt_count, created_at, updated_at)
+      VALUES (?, 0, datetime('now'), datetime('now'))
+      ON CONFLICT(bucket_key) DO NOTHING
+    `,
+    [bucketKey]
+  );
+  const updateResult = await execRun(
+    env,
+    `
+      UPDATE login_rate_limits
+      SET attempt_count = attempt_count + 1, updated_at = datetime('now')
+      WHERE bucket_key = ? AND attempt_count < ?
+    `,
+    [bucketKey, LOGIN_ATTEMPTS_PER_MINUTE]
+  );
+  const changed = Number(updateResult?.meta?.changes || 0);
+  if (changed === 0) {
+    return { allowed: false, retryAfterSeconds: 60 - new Date().getSeconds() };
+  }
+  await execRun(
+    env,
+    `DELETE FROM login_rate_limits WHERE updated_at < ?`,
+    [new Date(Date.now() - 10 * 60 * 1000).toISOString()]
+  );
+  return { allowed: true };
+}
+
+function publicUserShape(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    username: user.username_display,
+    wechat_id: user.wechat_id || null,
+    created_at: user.created_at,
+    last_login_at: user.last_login_at || null,
+    last_wechat_change_at: user.last_wechat_change_at || null,
+    password_changed_at: user.password_changed_at || null,
+  };
 }
 
 function formatAmzDate(date) {
@@ -1153,7 +1378,7 @@ async function handleRequest(request, env, ctx) {
             "UPDATE accounts SET reverified_at = datetime('now'), student_id = ?, student_name = ?, email = ? WHERE wechat_id = ?",
             [studentIdHashes.v2, studentNameHashes.v2, emailHashes.v2, wechat_id]
           );
-          const { token, expiresAt } = await createRenameToken(env, wechat_id);
+          const bind = await issueBindToken(env, wechat_id, 'ADFS');
           const reverifiedAt = new Date().toISOString();
           await execRun(
             env,
@@ -1167,8 +1392,9 @@ async function handleRequest(request, env, ctx) {
             success: true,
             message: 'Account reverified successfully.',
             reverified: true,
-            rename_token: token,
-            rename_token_expires_at: expiresAt,
+            wechat_id,
+            bind_token: bind.token,
+            bind_token_expires_at: bind.expiresAt,
           });
         }
         return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
@@ -1218,7 +1444,14 @@ async function handleRequest(request, env, ctx) {
         [wechat_id, studentIdHashes.v2, studentNameHashes.v2, emailHashes.v2]
       );
 
-      return jsonResponse({ success: true, message: 'Verified successfully via ADFS.' });
+      const bind = await issueBindToken(env, wechat_id, 'ADFS');
+      return jsonResponse({
+        success: true,
+        message: 'Verified successfully via ADFS.',
+        wechat_id,
+        bind_token: bind.token,
+        bind_token_expires_at: bind.expiresAt,
+      });
     }
 
     if (method === 'POST' && pathname === '/api/verify/email') {
@@ -1414,7 +1647,7 @@ async function handleRequest(request, env, ctx) {
             "UPDATE accounts SET reverified_at = datetime('now'), email = ? WHERE wechat_id = ?",
             [reverifyEmailDual.v2, wechat_id]
           );
-          const { token, expiresAt } = await createRenameToken(env, wechat_id);
+          const bind = await issueBindToken(env, wechat_id, 'Email');
           const reverifiedAt = new Date().toISOString();
           await execRun(
             env,
@@ -1429,8 +1662,9 @@ async function handleRequest(request, env, ctx) {
             success: true,
             message: 'Account reverified successfully.',
             reverified: true,
-            rename_token: token,
-            rename_token_expires_at: expiresAt,
+            wechat_id,
+            bind_token: bind.token,
+            bind_token_expires_at: bind.expiresAt,
           });
         }
         return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
@@ -1462,7 +1696,14 @@ async function handleRequest(request, env, ctx) {
         [wechat_id, normalizedEmail]
       );
 
-      return jsonResponse({ success: true, message: 'Verified successfully via Email.' });
+      const bind = await issueBindToken(env, wechat_id, 'Email');
+      return jsonResponse({
+        success: true,
+        message: 'Verified successfully via Email.',
+        wechat_id,
+        bind_token: bind.token,
+        bind_token_expires_at: bind.expiresAt,
+      });
     }
 
     if (method === 'POST' && pathname === '/api/verify/discord/callback') {
@@ -1626,7 +1867,7 @@ async function handleRequest(request, env, ctx) {
             "UPDATE accounts SET reverified_at = datetime('now'), discord_id = ? WHERE wechat_id = ?",
             [discordIdHashes.v2, wechat_id]
           );
-          const { token, expiresAt } = await createRenameToken(env, wechat_id);
+          const bind = await issueBindToken(env, wechat_id, 'Discord');
           const reverifiedAt = new Date().toISOString();
           await execRun(
             env,
@@ -1640,8 +1881,9 @@ async function handleRequest(request, env, ctx) {
             success: true,
             message: 'Account reverified successfully.',
             reverified: true,
-            rename_token: token,
-            rename_token_expires_at: expiresAt,
+            wechat_id,
+            bind_token: bind.token,
+            bind_token_expires_at: bind.expiresAt,
           });
         }
         return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
@@ -1661,10 +1903,14 @@ async function handleRequest(request, env, ctx) {
         [wechat_id, discordIdHashes.v2]
       );
 
+      const bind = await issueBindToken(env, wechat_id, 'Discord');
       return jsonResponse({
         success: true,
         message: 'Discord account connected and WeChat ID verified.',
         discord_id: body.discord_id,
+        wechat_id,
+        bind_token: bind.token,
+        bind_token_expires_at: bind.expiresAt,
       });
     }
 
@@ -1829,7 +2075,7 @@ async function handleRequest(request, env, ctx) {
             "UPDATE accounts SET reverified_at = datetime('now'), github_id = ? WHERE wechat_id = ?",
             [githubIdHashes.v2, wechat_id]
           );
-          const { token, expiresAt } = await createRenameToken(env, wechat_id);
+          const bind = await issueBindToken(env, wechat_id, 'GitHub');
           const reverifiedAt = new Date().toISOString();
           await execRun(
             env,
@@ -1843,8 +2089,9 @@ async function handleRequest(request, env, ctx) {
             success: true,
             message: 'Account reverified successfully.',
             reverified: true,
-            rename_token: token,
-            rename_token_expires_at: expiresAt,
+            wechat_id,
+            bind_token: bind.token,
+            bind_token_expires_at: bind.expiresAt,
           });
         }
         return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
@@ -1864,10 +2111,14 @@ async function handleRequest(request, env, ctx) {
         [wechat_id, githubIdHashes.v2]
       );
 
+      const bind = await issueBindToken(env, wechat_id, 'GitHub');
       return jsonResponse({
         success: true,
         message: 'GitHub account connected and WeChat ID verified.',
         github_id: body.github_id,
+        wechat_id,
+        bind_token: bind.token,
+        bind_token_expires_at: bind.expiresAt,
       });
     }
 
@@ -1922,45 +2173,309 @@ async function handleRequest(request, env, ctx) {
       });
     }
 
-    if (method === 'POST' && pathname === '/api/account/rename') {
+    // ------------------------------------------------------------------------
+    // ROwO Account endpoints (registration, login, session, wechat binding).
+    // ------------------------------------------------------------------------
+
+    if (method === 'POST' && pathname === '/api/user/register') {
       const body = await parseJson(request);
-      const { rename_token, new_wechat_id } = body;
-      const newId = new_wechat_id != null ? String(new_wechat_id).trim() : '';
-      if (!rename_token || !newId) {
-        return jsonResponse({ success: false, message: 'rename_token and new_wechat_id are required.' }, 400);
+      const usernameCheck = validateUsername(body.username);
+      if (!usernameCheck.ok) {
+        return jsonResponse({ success: false, message: usernameCheck.message }, 400);
       }
-      const oldWechatId = await consumeRenameToken(env, rename_token);
-      if (!oldWechatId) {
-        return jsonResponse({ success: false, message: 'Invalid or expired rename token.' }, 400);
+      const passwordCheck = validatePassword(body.password);
+      if (!passwordCheck.ok) {
+        return jsonResponse({ success: false, message: passwordCheck.message }, 400);
       }
-      if (oldWechatId === newId) {
-        return jsonResponse({ success: false, message: 'new_wechat_id must be different from current WeChat ID.' }, 400);
+      const existing = await queryFirst(
+        env,
+        'SELECT id FROM user_accounts WHERE username_normalized = ?',
+        [usernameCheck.normalized]
+      );
+      if (existing) {
+        return jsonResponse({ success: false, message: 'Username is already taken.' }, 409);
       }
+
+      let wechatIdToBind = null;
+      if (body.bind_token) {
+        const bindInfo = await consumeBindToken(env, body.bind_token);
+        if (!bindInfo) {
+          return jsonResponse({ success: false, message: 'Bind token is invalid or expired.' }, 401);
+        }
+        const wechatRow = await queryFirst(env, 'SELECT wechat_id FROM accounts WHERE wechat_id = ?', [bindInfo.wechatId]);
+        if (!wechatRow) {
+          return jsonResponse({ success: false, message: 'The WeChat ID in the bind token no longer exists.' }, 404);
+        }
+        const alreadyBound = await queryFirst(
+          env,
+          'SELECT id FROM user_accounts WHERE wechat_id = ?',
+          [bindInfo.wechatId]
+        );
+        if (alreadyBound) {
+          return jsonResponse({
+            success: false,
+            message: 'This WeChat ID is already linked to another ROwO account. Sign in to that account instead.',
+          }, 409);
+        }
+        wechatIdToBind = bindInfo.wechatId;
+      }
+
+      const id = crypto.randomUUID();
+      const passwordHash = await hashPassword(body.password);
+
+      try {
+        await execRun(
+          env,
+          `
+            INSERT INTO user_accounts (id, username_normalized, username_display, password_hash, wechat_id, password_changed_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+          `,
+          [id, usernameCheck.normalized, usernameCheck.display, passwordHash, wechatIdToBind]
+        );
+      } catch (error) {
+        if (String(error?.message || error).toLowerCase().includes('unique')) {
+          return jsonResponse({ success: false, message: 'Username or WeChat ID is already taken.' }, 409);
+        }
+        return genericError('user_register', error);
+      }
+
+      const user = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [id]);
+      const token = await issueUserSessionToken(env, id, usernameCheck.display);
+      return jsonResponse({
+        success: true,
+        message: 'Account created.',
+        token,
+        user: publicUserShape(user),
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/login') {
+      const body = await parseJson(request);
+      const rawUsername = String(body.username == null ? '' : body.username).trim();
+      const rawPassword = String(body.password == null ? '' : body.password);
+      if (!rawUsername || !rawPassword) {
+        return jsonResponse({ success: false, message: 'Username and password are required.' }, 400);
+      }
+      const normalized = normalizeUsername(rawUsername);
+
+      const ip = getClientIp(request);
+      const minuteKey = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+      const ipBucket = `ip:${ip}:${minuteKey}`;
+      const userBucket = `user:${normalized}:${minuteKey}`;
+      const ipQuota = await consumeLoginRateLimit(env, ipBucket);
+      if (!ipQuota.allowed) {
+        return jsonResponse({
+          success: false,
+          message: 'Too many login attempts. Please try again in a minute.',
+          retry_after_seconds: ipQuota.retryAfterSeconds,
+        }, 429);
+      }
+      const userQuota = await consumeLoginRateLimit(env, userBucket);
+      if (!userQuota.allowed) {
+        return jsonResponse({
+          success: false,
+          message: 'Too many login attempts for this account. Please try again in a minute.',
+          retry_after_seconds: userQuota.retryAfterSeconds,
+        }, 429);
+      }
+
+      const user = await queryFirst(env, 'SELECT * FROM user_accounts WHERE username_normalized = ?', [normalized]);
+      const storedHash = user ? user.password_hash : DUMMY_PASSWORD_HASH;
+      const ok = await verifyPassword(rawPassword, storedHash);
+      if (!user || !ok) {
+        return jsonResponse({ success: false, message: 'Invalid username or password.' }, 401);
+      }
+
+      await execRun(env, "UPDATE user_accounts SET last_login_at = datetime('now') WHERE id = ?", [user.id]);
+      const token = await issueUserSessionToken(env, user.id, user.username_display);
+      const fresh = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [user.id]);
+      return jsonResponse({
+        success: true,
+        message: 'Signed in.',
+        token,
+        user: publicUserShape(fresh),
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/logout') {
+      // Stateless JWT — client drops the token. Endpoint exists for symmetry.
+      return jsonResponse({ success: true, message: 'Signed out.' });
+    }
+
+    if (method === 'GET' && pathname === '/api/user/me') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const user = auth.user;
+      let verification = null;
+      if (user.wechat_id) {
+        const row = await queryFirst(
+          env,
+          `SELECT wechat_id, verified_status, verification_method, verification_time,
+                  manual_status, reverified_at
+             FROM accounts WHERE wechat_id = ?`,
+          [user.wechat_id]
+        );
+        if (row) {
+          verification = {
+            wechat_id: row.wechat_id,
+            verified_status: Number(row.verified_status) === 1,
+            verification_method: row.verification_method || null,
+            verification_time: row.verification_time || null,
+            manual_status: row.manual_status || null,
+            reverified_at: row.reverified_at || null,
+          };
+        } else {
+          verification = { wechat_id: user.wechat_id, missing: true };
+        }
+      }
+      return jsonResponse({
+        success: true,
+        user: publicUserShape(user),
+        verification,
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/bind-wechat') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const bindInfo = await consumeBindToken(env, body.bind_token);
+      if (!bindInfo) {
+        return jsonResponse({ success: false, message: 'Bind token is invalid or expired.' }, 401);
+      }
+
+      const accountRow = await queryFirst(env, 'SELECT wechat_id FROM accounts WHERE wechat_id = ?', [bindInfo.wechatId]);
+      if (!accountRow) {
+        return jsonResponse({ success: false, message: 'The WeChat ID in the bind token no longer exists.' }, 404);
+      }
+
+      if (auth.user.wechat_id) {
+        if (auth.user.wechat_id === bindInfo.wechatId) {
+          return jsonResponse({
+            success: true,
+            message: 'Already bound to this WeChat ID.',
+            user: publicUserShape(auth.user),
+          });
+        }
+        return jsonResponse({
+          success: false,
+          message: 'This ROwO account is already bound to a different WeChat ID. Use Change WeChat ID instead.',
+        }, 409);
+      }
+
+      const claimedBy = await queryFirst(env, 'SELECT id FROM user_accounts WHERE wechat_id = ?', [bindInfo.wechatId]);
+      if (claimedBy) {
+        return jsonResponse({
+          success: false,
+          message: 'This WeChat ID is already linked to another ROwO account.',
+        }, 409);
+      }
+
+      try {
+        await execRun(
+          env,
+          "UPDATE user_accounts SET wechat_id = ?, updated_at = datetime('now') WHERE id = ?",
+          [bindInfo.wechatId, auth.user.id]
+        );
+      } catch (error) {
+        if (String(error?.message || error).toLowerCase().includes('unique')) {
+          return jsonResponse({
+            success: false,
+            message: 'This WeChat ID is already linked to another ROwO account.',
+          }, 409);
+        }
+        return genericError('user_bind_wechat', error);
+      }
+
+      const fresh = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [auth.user.id]);
+      return jsonResponse({
+        success: true,
+        message: 'WeChat ID bound.',
+        user: publicUserShape(fresh),
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/change-wechat') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const newId = body.new_wechat_id != null ? String(body.new_wechat_id).trim() : '';
+      if (!body.current_password || !body.bind_token || !newId) {
+        return jsonResponse({
+          success: false,
+          message: 'current_password, bind_token, and new_wechat_id are required.',
+        }, 400);
+      }
+
+      if (!auth.user.wechat_id) {
+        return jsonResponse({
+          success: false,
+          message: 'No WeChat ID is currently bound. Use Bind WeChat ID instead.',
+        }, 400);
+      }
+
+      const oldId = auth.user.wechat_id;
+      if (oldId === newId) {
+        return jsonResponse({
+          success: false,
+          message: 'new_wechat_id must be different from the current WeChat ID.',
+        }, 400);
+      }
+
+      const oneYearMs = 365 * 24 * 60 * 60 * 1000;
+      const lastChangeAt = auth.user.last_wechat_change_at ? Date.parse(String(auth.user.last_wechat_change_at)) : 0;
+      if (Number.isFinite(lastChangeAt) && lastChangeAt > 0 && Date.now() - lastChangeAt < oneYearMs) {
+        const nextEligibleAt = new Date(lastChangeAt + oneYearMs).toISOString();
+        return jsonResponse({
+          success: false,
+          message: `You can only change your WeChat ID once per year. You will be able to change it again on ${nextEligibleAt} (UTC).`,
+          next_eligible_at: nextEligibleAt,
+        }, 429);
+      }
+
+      const passwordOk = await verifyPassword(String(body.current_password), auth.user.password_hash);
+      if (!passwordOk) {
+        return jsonResponse({ success: false, message: 'Current password is incorrect.' }, 401);
+      }
+
+      const bindInfo = await consumeBindToken(env, body.bind_token);
+      if (!bindInfo) {
+        return jsonResponse({ success: false, message: 'Bind token is invalid or expired.' }, 401);
+      }
+      if (bindInfo.wechatId !== newId) {
+        return jsonResponse({
+          success: false,
+          message: 'Bind token does not match new_wechat_id.',
+        }, 400);
+      }
+
+      const conflictingRowoAccount = await queryFirst(
+        env,
+        'SELECT id FROM user_accounts WHERE wechat_id = ? AND id != ?',
+        [newId, auth.user.id]
+      );
+      if (conflictingRowoAccount) {
+        return jsonResponse({
+          success: false,
+          message: 'This WeChat ID is already linked to another ROwO account.',
+        }, 409);
+      }
+
       const existingNew = await queryFirst(env, 'SELECT wechat_id FROM accounts WHERE wechat_id = ?', [newId]);
       if (existingNew) {
         return jsonResponse({ success: false, message: 'The new WeChat ID is already in use.' }, 409);
       }
-      const row = await queryFirst(env, 'SELECT * FROM accounts WHERE wechat_id = ?', [oldWechatId]);
+
+      const row = await queryFirst(env, 'SELECT * FROM accounts WHERE wechat_id = ?', [oldId]);
       if (!row) {
-        return jsonResponse({ success: false, message: 'Account not found.' }, 404);
+        return jsonResponse({ success: false, message: 'Current account record not found.' }, 404);
       }
-      const oneYearMs = 365 * 24 * 60 * 60 * 1000;
-      const lastRenameAt = row.last_rename_at ? Date.parse(String(row.last_rename_at)) : 0;
-      if (Number.isFinite(lastRenameAt) && Date.now() - lastRenameAt < oneYearMs) {
-        const nextEligibleAt = new Date(lastRenameAt + oneYearMs).toISOString();
-        return jsonResponse(
-          {
-            success: false,
-            message: 'You can only change your WeChat ID once per year, you will be able to change it again on ' + nextEligibleAt + ' (UTC).'
-          },
-          429
-        );
-      }
+
       await execRun(
         env,
         `
-          INSERT INTO accounts (wechat_id, verified_status, verification_method, verification_time, student_id, student_name, email, discord_id, github_id, manual_status, manual_reason, manual_admin, manual_time, reverified_at, last_rename_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO accounts (wechat_id, verified_status, verification_method, verification_time, student_id, student_name, email, discord_id, github_id, manual_status, manual_reason, manual_admin, manual_time, reverified_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         [
           newId,
@@ -1976,14 +2491,15 @@ async function handleRequest(request, env, ctx) {
           row.manual_reason ?? null,
           row.manual_admin ?? null,
           row.manual_time ?? null,
-          row.reverified_at ?? null
+          row.reverified_at ?? null,
         ]
       );
-      await execRun(env, 'UPDATE account_info SET wechat_id = ? WHERE wechat_id = ?', [newId, oldWechatId]);
-      await execRun(env, 'UPDATE account_blacklist SET wechat_id = ? WHERE wechat_id = ?', [newId, oldWechatId]);
-      await execRun(env, 'DELETE FROMemail_verification_codes WHERE wechat_id = ?', [oldWechatId]);
-      await execRun(env, 'DELETE FROM accounts WHERE wechat_id = ?', [oldWechatId]);
-      const changeBody = `WeChat ID was changed from **${oldWechatId}** to **${newId}**.`;
+      await execRun(env, 'UPDATE account_info SET wechat_id = ? WHERE wechat_id = ?', [newId, oldId]);
+      await execRun(env, 'UPDATE account_blacklist SET wechat_id = ? WHERE wechat_id = ?', [newId, oldId]);
+      await execRun(env, 'DELETE FROM email_verification_codes WHERE wechat_id = ?', [oldId]);
+      await execRun(env, 'DELETE FROM accounts WHERE wechat_id = ?', [oldId]);
+
+      const changeBody = `WeChat ID was changed from **${oldId}** to **${newId}**.`;
       await execRun(
         env,
         `
@@ -1992,21 +2508,63 @@ async function handleRequest(request, env, ctx) {
         `,
         [newId, 'emerald', 'pencil', 'WeChat ID changed', changeBody, 'SYSTEM', 'public']
       );
+
+      await execRun(
+        env,
+        `
+          UPDATE user_accounts
+          SET wechat_id = ?, last_wechat_change_at = datetime('now'), updated_at = datetime('now')
+          WHERE id = ?
+        `,
+        [newId, auth.user.id]
+      );
+
+      const fresh = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [auth.user.id]);
       return jsonResponse({
         success: true,
         message: 'WeChat ID changed successfully.',
         wechat_id: newId,
+        user: publicUserShape(fresh),
       });
     }
 
-    if (method === 'POST' && pathname === '/api/account/rename/invalidate') {
+    if (method === 'POST' && pathname === '/api/user/change-password') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
       const body = await parseJson(request);
-      const { rename_token } = body;
-      if (!rename_token) {
-        return jsonResponse({ success: false, message: 'rename_token is required.' }, 400);
+      const current = String(body.current_password == null ? '' : body.current_password);
+      const next = String(body.new_password == null ? '' : body.new_password);
+      if (!current || !next) {
+        return jsonResponse({
+          success: false,
+          message: 'current_password and new_password are required.',
+        }, 400);
       }
-      await invalidateRenameToken(env, rename_token);
-      return jsonResponse({ success: true, message: 'Rename token invalidated.' });
+      const passwordCheck = validatePassword(next);
+      if (!passwordCheck.ok) {
+        return jsonResponse({ success: false, message: passwordCheck.message }, 400);
+      }
+      const passwordOk = await verifyPassword(current, auth.user.password_hash);
+      if (!passwordOk) {
+        return jsonResponse({ success: false, message: 'Current password is incorrect.' }, 401);
+      }
+      if (current === next) {
+        return jsonResponse({
+          success: false,
+          message: 'New password must differ from current password.',
+        }, 400);
+      }
+      const newHash = await hashPassword(next);
+      await execRun(
+        env,
+        `
+          UPDATE user_accounts
+          SET password_hash = ?, password_changed_at = datetime('now'), updated_at = datetime('now')
+          WHERE id = ?
+        `,
+        [newHash, auth.user.id]
+      );
+      return jsonResponse({ success: true, message: 'Password changed.' });
     }
 
     if (method === 'GET' && pathname === '/api/admin/stats') {
@@ -2156,6 +2714,14 @@ async function handleRequest(request, env, ctx) {
           `,
           [auth.admin.username, wechatId]
         );
+        const bind = await issueBindToken(env, wechatId, 'Manual');
+        return jsonResponse({
+          success: true,
+          message: 'Application approved.',
+          wechat_id: wechatId,
+          bind_token: bind.token,
+          bind_token_expires_at: bind.expiresAt,
+        });
       } else if (action === 'reject') {
         await execRun(
           env,
@@ -2492,6 +3058,77 @@ async function handleRequest(request, env, ctx) {
       const newToken = `${crypto.randomUUID()}${Date.now().toString(36)}`;
       await execRun(env, 'UPDATE admins SET access_token = ? WHERE id = ?', [newToken, auth.admin.id]);
       return jsonResponse({ success: true, token: newToken });
+    }
+
+    if (method === 'GET' && pathname === '/api/admin/users') {
+      const auth = await requireAuth(request, env);
+      if (auth.response) return auth.response;
+      const rows = await queryAll(
+        env,
+        `
+          SELECT id, username_display, wechat_id, created_at, last_login_at,
+                 last_wechat_change_at, password_changed_at
+          FROM user_accounts
+          ORDER BY created_at DESC
+          LIMIT 500
+        `
+      );
+      return jsonResponse({
+        success: true,
+        users: rows.map((row) => ({
+          id: row.id,
+          username: row.username_display,
+          wechat_id: row.wechat_id || null,
+          created_at: row.created_at,
+          last_login_at: row.last_login_at || null,
+          last_wechat_change_at: row.last_wechat_change_at || null,
+          password_changed_at: row.password_changed_at || null,
+        })),
+      });
+    }
+
+    const userResetMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/reset-password$/);
+    if (method === 'POST' && userResetMatch) {
+      const auth = await requireAdmin(request, env);
+      if (auth.response) return auth.response;
+      const id = decodeURIComponent(userResetMatch[1]);
+      const body = await parseJson(request);
+      const passwordCheck = validatePassword(body.new_password);
+      if (!passwordCheck.ok) {
+        return jsonResponse({ success: false, message: passwordCheck.message }, 400);
+      }
+      const target = await queryFirst(env, 'SELECT id FROM user_accounts WHERE id = ?', [id]);
+      if (!target) {
+        return jsonResponse({ success: false, message: 'User not found.' }, 404);
+      }
+      const newHash = await hashPassword(String(body.new_password));
+      await execRun(
+        env,
+        `
+          UPDATE user_accounts
+          SET password_hash = ?, password_changed_at = datetime('now'), updated_at = datetime('now')
+          WHERE id = ?
+        `,
+        [newHash, id]
+      );
+      return jsonResponse({ success: true, message: 'Password reset.' });
+    }
+
+    const userUnbindMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/unbind-wechat$/);
+    if (method === 'POST' && userUnbindMatch) {
+      const auth = await requireAdmin(request, env);
+      if (auth.response) return auth.response;
+      const id = decodeURIComponent(userUnbindMatch[1]);
+      const target = await queryFirst(env, 'SELECT id FROM user_accounts WHERE id = ?', [id]);
+      if (!target) {
+        return jsonResponse({ success: false, message: 'User not found.' }, 404);
+      }
+      await execRun(
+        env,
+        "UPDATE user_accounts SET wechat_id = NULL, updated_at = datetime('now') WHERE id = ?",
+        [id]
+      );
+      return jsonResponse({ success: true, message: 'WeChat ID unbound.' });
     }
 
     if (method === 'GET' && pathname === '/api/admin/preferences') {

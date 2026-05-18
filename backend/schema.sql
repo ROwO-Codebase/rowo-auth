@@ -12,9 +12,8 @@ CREATE TABLE accounts (
   manual_status TEXT,
   manual_reason TEXT,
   manual_admin TEXT,
-  manual_time DATETIME, 
-  reverified_at DATETIME, 
-  last_rename_at DATETIME
+  manual_time DATETIME,
+  reverified_at DATETIME
 );
 CREATE TABLE admins (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,11 +99,23 @@ CREATE TABLE stats (
   key TEXT NOT NULL UNIQUE,
   value INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE rename_tokens (
-  token_hash TEXT PRIMARY KEY,
-  wechat_id TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  created_at TEXT
+CREATE TABLE user_accounts (
+  id TEXT PRIMARY KEY,
+  username_normalized TEXT NOT NULL UNIQUE,
+  username_display TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  wechat_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_login_at TEXT,
+  last_wechat_change_at TEXT,
+  password_changed_at TEXT
+);
+CREATE TABLE login_rate_limits (
+  bucket_key TEXT PRIMARY KEY,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 DELETE FROM sqlite_sequence;
 CREATE INDEX idx_email_verification_expires_at
@@ -121,3 +132,9 @@ CREATE INDEX idx_discord_trusted_servers_active_guild
 ON discord_trusted_servers(is_active, guild_id);
 CREATE INDEX idx_discord_trusted_servers_invite_code
 ON discord_trusted_servers(invite_code);
+CREATE UNIQUE INDEX idx_user_accounts_wechat_id
+  ON user_accounts(wechat_id) WHERE wechat_id IS NOT NULL;
+CREATE INDEX idx_user_accounts_created_at
+  ON user_accounts(created_at);
+CREATE INDEX idx_login_rate_limits_updated_at
+  ON login_rate_limits(updated_at);

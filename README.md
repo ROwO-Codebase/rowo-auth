@@ -173,10 +173,15 @@ Core verification routes:
 - `POST /api/verify/github/connect`
 - `POST /api/verify/manual`
 
-Account rename routes:
+ROwO Account routes (username + password):
 
-- `POST /api/account/rename`
-- `POST /api/account/rename/invalidate`
+- `POST /api/user/register`
+- `POST /api/user/login`
+- `POST /api/user/logout`
+- `GET /api/user/me`
+- `POST /api/user/bind-wechat`
+- `POST /api/user/change-wechat`
+- `POST /api/user/change-password`
 
 Admin routes:
 
@@ -192,6 +197,9 @@ Admin routes:
 - `GET|POST /api/admin/accounts/:wechatId/info`
 - `PUT|DELETE /api/admin/info/:id`
 - `POST /api/admin/accounts/:wechatId/(revoke|unrevoke|manual|blacklist|unblacklist)`
+- `GET /api/admin/users`
+- `POST /api/admin/users/:id/reset-password`
+- `POST /api/admin/users/:id/unbind-wechat`
 
 ## Security Notes
 
