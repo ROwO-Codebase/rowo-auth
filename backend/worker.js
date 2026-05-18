@@ -1120,7 +1120,11 @@ async function handleRequest(request, env, ctx) {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
         if (method === 'ADFS') {
-          await execRun(env, "UPDATE accounts SET reverified_at = datetime('now') WHERE wechat_id = ?", [wechat_id]);
+          await execRun(
+            env,
+            "UPDATE accounts SET reverified_at = datetime('now'), student_id = ?, student_name = ?, email = ? WHERE wechat_id = ?",
+            [studentIdHashes.v2, studentNameHashes.v2, emailHashes.v2, wechat_id]
+          );
           const { token, expiresAt } = await createRenameToken(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
           await execRun(
@@ -1366,7 +1370,12 @@ async function handleRequest(request, env, ctx) {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
         if (method === 'Email') {
-          await execRun(env, "UPDATE accounts SET reverified_at = datetime('now') WHERE wechat_id = ?", [wechat_id]);
+          const reverifyEmailV2 = await hmacSensitive(env, 'email', normalizedEmail);
+          await execRun(
+            env,
+            "UPDATE accounts SET reverified_at = datetime('now'), email = ? WHERE wechat_id = ?",
+            [reverifyEmailV2, wechat_id]
+          );
           const { token, expiresAt } = await createRenameToken(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
           await execRun(
@@ -1565,7 +1574,11 @@ async function handleRequest(request, env, ctx) {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
         if (method === 'Discord') {
-          await execRun(env, "UPDATE accounts SET reverified_at = datetime('now') WHERE wechat_id = ?", [wechat_id]);
+          await execRun(
+            env,
+            "UPDATE accounts SET reverified_at = datetime('now'), discord_id = ? WHERE wechat_id = ?",
+            [discordIdHashes.v2, wechat_id]
+          );
           const { token, expiresAt } = await createRenameToken(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
           await execRun(
@@ -1755,7 +1768,11 @@ async function handleRequest(request, env, ctx) {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
         if (method === 'GitHub') {
-          await execRun(env, "UPDATE accounts SET reverified_at = datetime('now') WHERE wechat_id = ?", [wechat_id]);
+          await execRun(
+            env,
+            "UPDATE accounts SET reverified_at = datetime('now'), github_id = ? WHERE wechat_id = ?",
+            [githubIdHashes.v2, wechat_id]
+          );
           const { token, expiresAt } = await createRenameToken(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
           await execRun(
