@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "backend"
   ],
   "scripts": {
     "dev:main": "npm run dev -w @rowo/main",

@@ -9,7 +9,16 @@ import {
   FileText, Shield,
 } from 'lucide-react';
 import { useSession } from '../contexts/SessionContext';
-import { authHeaders } from '@rowo/shared/session';
+import {
+  authHeaders,
+  type TwoFactorMethod,
+  type TwoFactorSummary,
+} from '@rowo/shared/session';
+import { TwoFactorCard } from '../components/2fa/TwoFactorCard';
+import {
+  TwoFactorChallengeForm,
+  type TwoFactorSubmitValues,
+} from '../components/2fa/TwoFactorChallengeForm';
 
 interface PublicInfoNote {
   id: number;
@@ -58,7 +67,7 @@ function formatDate(s: string | null | undefined): string {
 
 export default function UserCenterPage() {
   const navigate = useNavigate();
-  const { user, verification, loading, signOut, refresh } = useSession();
+  const { user, verification, twoFactor, loading, signOut, refresh } = useSession();
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [publicProfile, setPublicProfile] = useState<PublicProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -219,10 +228,16 @@ export default function UserCenterPage() {
             <KeyRound className="w-5 h-5 text-indigo-600 mt-0.5" />
             <div>
               <div className="font-medium text-slate-900">Change Password</div>
-              <div className="text-xs text-slate-500 mt-1">Requires current password.</div>
+              <div className="text-xs text-slate-500 mt-1">
+                {(twoFactor?.totp_enabled || (twoFactor?.passkeys.length ?? 0) > 0)
+                  ? 'Requires current password and 2FA.'
+                  : 'Requires current password.'}
+              </div>
             </div>
           </button>
         </div>
+
+        <TwoFactorCard summary={twoFactor} onChanged={() => { void refresh(); }} />
 
         <div className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center justify-between">
           <div className="text-sm text-slate-500">Sign out of this browser.</div>
@@ -239,6 +254,7 @@ export default function UserCenterPage() {
       <AnimatePresence>
         {showPasswordModal && (
           <ChangePasswordModal
+            twoFactor={twoFactor}
             onClose={() => setShowPasswordModal(false)}
             onSuccess={async () => {
               await refresh();
@@ -251,24 +267,56 @@ export default function UserCenterPage() {
   );
 }
 
-function ChangePasswordModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void | Promise<void> }) {
+function ChangePasswordModal({
+  twoFactor,
+  onClose,
+  onSuccess,
+}: {
+  twoFactor: TwoFactorSummary | null;
+  onClose: () => void;
+  onSuccess: () => void | Promise<void>;
+}) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [message, setMessage] = useState('');
+  const [availableMethods, setAvailableMethods] = useState<TwoFactorMethod[]>(() => {
+    const m: TwoFactorMethod[] = [];
+    if (twoFactor?.totp_enabled) m.push('totp');
+    if ((twoFactor?.passkeys.length ?? 0) > 0) m.push('passkey');
+    if ((twoFactor?.recovery_codes_remaining ?? 0) > 0) m.push('recovery');
+    return m;
+  });
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setMessage('');
-    if (newPassword !== confirmNewPassword) {
-      setStatus('error');
-      setMessage('New passwords do not match.');
-      return;
-    }
+  const twoFactorRequired = availableMethods.length > 0;
+
+  const fetchPasskeyChallenge = useCallback(async () => {
+    const res = await fetch(`${__API_ENDPOINT__}/api/user/2fa/passkey/challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ purpose: 'reauth' }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Could not fetch passkey challenge.');
+    return { options: data.options, challenge_token: data.challenge_token };
+  }, []);
+
+  const validate = (): string | null => {
+    if (!currentPassword) return 'Current password is required.';
+    if (newPassword !== confirmNewPassword) return 'New passwords do not match.';
     if (newPassword.length < 10 || !/[A-Za-z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+      return 'Password must be at least 10 characters with a letter and a digit.';
+    }
+    return null;
+  };
+
+  const submit = async (factor: TwoFactorSubmitValues = {}) => {
+    setMessage('');
+    const validationError = validate();
+    if (validationError) {
       setStatus('error');
-      setMessage('Password must be at least 10 characters with a letter and a digit.');
+      setMessage(validationError);
       return;
     }
     setStatus('loading');
@@ -276,7 +324,11 @@ function ChangePasswordModal({ onClose, onSuccess }: { onClose: () => void; onSu
       const res = await fetch(`${__API_ENDPOINT__}/api/user/change-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+          ...factor,
+        }),
       });
       const data = await res.json();
       if (data.success) {
@@ -287,12 +339,21 @@ function ChangePasswordModal({ onClose, onSuccess }: { onClose: () => void; onSu
         }, 600);
         return;
       }
+      if (data.two_factor_required && Array.isArray(data.available_methods)) {
+        setAvailableMethods(data.available_methods);
+      }
       setStatus('error');
       setMessage(data.message || 'Could not change password.');
     } catch {
       setStatus('error');
       setMessage('Network error.');
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    // When 2FA is not required, submit directly.
+    if (!twoFactorRequired) await submit();
   };
 
   return (
@@ -361,7 +422,23 @@ function ChangePasswordModal({ onClose, onSuccess }: { onClose: () => void; onSu
             />
           </div>
 
-          {status === 'error' && message && (
+          {twoFactorRequired && (
+            <div className="pt-1 border-t border-slate-100">
+              <div className="text-xs uppercase tracking-wide text-slate-500 mt-3 mb-2">
+                Confirm with 2FA
+              </div>
+              <TwoFactorChallengeForm
+                availableMethods={availableMethods}
+                onSubmit={submit}
+                busy={status === 'loading'}
+                errorMessage={status === 'error' ? message : null}
+                fetchPasskeyChallenge={fetchPasskeyChallenge}
+                compact
+              />
+            </div>
+          )}
+
+          {!twoFactorRequired && status === 'error' && message && (
             <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-sm text-red-700 flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
               <span>{message}</span>
@@ -382,14 +459,16 @@ function ChangePasswordModal({ onClose, onSuccess }: { onClose: () => void; onSu
             >
               Cancel
             </button>
-            <button
-              type="submit"
-              disabled={status === 'loading' || status === 'success'}
-              className="flex-1 py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white text-sm font-medium rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2"
-            >
-              {status === 'loading' ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-              {status === 'loading' ? 'Saving...' : 'Change password'}
-            </button>
+            {!twoFactorRequired && (
+              <button
+                type="submit"
+                disabled={status === 'loading' || status === 'success'}
+                className="flex-1 py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white text-sm font-medium rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2"
+              >
+                {status === 'loading' ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                {status === 'loading' ? 'Saving...' : 'Change password'}
+              </button>
+            )}
           </div>
         </form>
       </motion.div>

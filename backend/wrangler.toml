@@ -1,6 +1,7 @@
 name = "rowo-auth"
 main = "worker.js"
 compatibility_date = "2026-04-16"
+compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
 # Set this in CI or locally before deploy:
@@ -26,13 +27,17 @@ SES_FROM_EMAIL = "verification@rowo.link"
 SES_FROM_NAME = "ROwO Auth"
 # GITHUB_CLIENT_SECRET, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN,
 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, SENSITIVE_DATA_HASH_SECRET,
-# ADFS_JWT_SECRET, ROWO_AUTH_JWT_SECRET
+# ADFS_JWT_SECRET, ROWO_AUTH_JWT_SECRET, TWO_FACTOR_ENC_KEY
 # must be set as Wrangler secrets (wrangler secret put ...).
 # ROWO_AUTH_JWT_SECRET: 32+ random bytes (base64). Used to sign ROwO Account
 # session JWTs and bind tokens. Generate with: openssl rand -base64 48
+# TWO_FACTOR_ENC_KEY: exactly 32 random bytes (base64) used as the AES-GCM
+# key that encrypts each user's TOTP secret at rest. Generate with:
+# openssl rand -base64 32
 
 [env.production]
 name = "rowo-auth"
+compatibility_flags = ["nodejs_compat"]
 
 [[env.production.d1_databases]]
 binding = "auth_database"

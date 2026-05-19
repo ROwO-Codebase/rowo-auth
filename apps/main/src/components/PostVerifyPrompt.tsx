@@ -1,9 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
-import { UserPlus, LogIn, Sparkles, CheckCircle2, ArrowRight, AlertTriangle, Loader2, KeyRound } from 'lucide-react';
+import { UserPlus, LogIn, Sparkles, CheckCircle2, ArrowRight, AlertTriangle, Loader2, KeyRound, Shield } from 'lucide-react';
 import { useSession } from '../contexts/SessionContext';
-import { authHeaders } from '@rowo/shared/session';
+import { authHeaders, type TwoFactorMethod } from '@rowo/shared/session';
+import {
+  TwoFactorChallengeForm,
+  type TwoFactorSubmitValues,
+} from './2fa/TwoFactorChallengeForm';
 
 interface Props {
   bindToken: string;
@@ -26,11 +30,37 @@ type Phase =
 
 export default function PostVerifyPrompt({ bindToken, wechatId, method, reverified, alreadyLinkedToRowo, pending }: Props) {
   const navigate = useNavigate();
-  const { user, refresh, signOut } = useSession();
+  const { user, twoFactor, refresh, signOut } = useSession();
   const [phase, setPhase] = useState<Phase>('choose');
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [currentPassword, setCurrentPassword] = useState('');
+  const [available2faMethods, setAvailable2faMethods] = useState<TwoFactorMethod[]>([]);
   void method; // accepted for future logging; not currently rendered
+
+  const twoFactorRequired = useMemo(() => available2faMethods.length > 0, [available2faMethods]);
+
+  useEffect(() => {
+    if (!twoFactor) {
+      setAvailable2faMethods([]);
+      return;
+    }
+    const methods: TwoFactorMethod[] = [];
+    if (twoFactor.totp_enabled) methods.push('totp');
+    if (twoFactor.passkeys.length > 0) methods.push('passkey');
+    if (twoFactor.recovery_codes_remaining > 0) methods.push('recovery');
+    setAvailable2faMethods(methods);
+  }, [twoFactor]);
+
+  const fetchPasskeyChallenge = async () => {
+    const res = await fetch(`${__API_ENDPOINT__}/api/user/2fa/passkey/challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ purpose: 'change-wechat' }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Could not fetch passkey challenge.');
+    return { options: data.options, challenge_token: data.challenge_token };
+  };
 
   useEffect(() => {
     if (!user) {
@@ -68,8 +98,7 @@ export default function PostVerifyPrompt({ bindToken, wechatId, method, reverifi
     setPhase('conflict');
   }, [user, wechatId, bindToken, refresh]);
 
-  const handleSwitchSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitSwitch = async (factor: TwoFactorSubmitValues = {}) => {
     if (!currentPassword) return;
     setPhase('switching');
     setErrorMessage('');
@@ -81,22 +110,31 @@ export default function PostVerifyPrompt({ bindToken, wechatId, method, reverifi
           current_password: currentPassword,
           bind_token: bindToken,
           new_wechat_id: wechatId,
+          ...factor,
         }),
       });
       const data = await res.json();
       if (data.success) {
         await refresh();
+        setCurrentPassword('');
         setPhase('switched');
         return;
+      }
+      if (data.two_factor_required && Array.isArray(data.available_methods)) {
+        setAvailable2faMethods(data.available_methods);
       }
       setErrorMessage(data.message || 'Could not switch the binding.');
       setPhase('conflict');
     } catch {
       setErrorMessage('Network error while switching the binding.');
       setPhase('conflict');
-    } finally {
-      setCurrentPassword('');
     }
+  };
+
+  const handleSwitchSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (twoFactorRequired) return; // 2FA submit handles network call
+    await submitSwitch();
   };
 
   if (phase === 'auto-binding') {
@@ -218,21 +256,40 @@ export default function PostVerifyPrompt({ bindToken, wechatId, method, reverifi
               </p>
             </div>
 
-            {errorMessage && (
+            {twoFactorRequired && currentPassword && (
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <Shield className="w-4 h-4 text-indigo-600" />
+                  <div className="text-sm font-medium text-slate-900">Confirm with 2FA</div>
+                </div>
+                <TwoFactorChallengeForm
+                  availableMethods={available2faMethods}
+                  onSubmit={submitSwitch}
+                  busy={phase === 'switching'}
+                  errorMessage={errorMessage || null}
+                  fetchPasskeyChallenge={fetchPasskeyChallenge}
+                  compact
+                />
+              </div>
+            )}
+
+            {!twoFactorRequired && errorMessage && (
               <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-sm text-red-700 flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
                 <span>{errorMessage}</span>
               </div>
             )}
 
-            <button
-              type="submit"
-              disabled={phase === 'switching' || !currentPassword}
-              className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-medium rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2"
-            >
-              {phase === 'switching' ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
-              {phase === 'switching' ? 'Switching...' : 'Switch binding to new WeChat ID'}
-            </button>
+            {!twoFactorRequired && (
+              <button
+                type="submit"
+                disabled={phase === 'switching' || !currentPassword}
+                className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-medium rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2"
+              >
+                {phase === 'switching' ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+                {phase === 'switching' ? 'Switching...' : 'Switch binding to new WeChat ID'}
+              </button>
+            )}
           </form>
         )}
 

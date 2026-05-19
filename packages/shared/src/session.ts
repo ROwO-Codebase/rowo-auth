@@ -70,10 +70,38 @@ export interface BlacklistInfo {
   added_at: string;
 }
 
+export interface TwoFactorPasskey {
+  id: string;
+  nickname: string;
+  created_at: string;
+  last_used_at: string | null;
+  device_type: 'singleDevice' | 'multiDevice' | null;
+  backed_up: boolean;
+}
+
+export interface TwoFactorSummary {
+  totp_enabled: boolean;
+  passkeys: TwoFactorPasskey[];
+  recovery_codes_remaining: number;
+  recovery_codes_total: number;
+  recovery_codes_batch_id: number | null;
+  recovery_codes_generated_at: string | null;
+}
+
+export type TwoFactorMethod = 'totp' | 'passkey' | 'recovery';
+
+export interface LoginTwoFactorChallenge {
+  challenge_token: string;
+  methods: TwoFactorMethod[];
+  webauthn_options: unknown | null;
+  passkey_challenge_token: string | null;
+}
+
 export interface MeResponse {
   success: boolean;
   user: SessionUser | null;
   verification: SessionVerification | null;
+  two_factor?: TwoFactorSummary | null;
   message?: string;
   blacklisted?: boolean;
   blacklist?: BlacklistInfo | null;

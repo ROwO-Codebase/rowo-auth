@@ -8,11 +8,13 @@ import {
   type BlacklistInfo,
   type SessionUser,
   type SessionVerification,
+  type TwoFactorSummary,
 } from '@rowo/shared/session';
 
 interface SessionContextValue {
   user: SessionUser | null;
   verification: SessionVerification | null;
+  twoFactor: TwoFactorSummary | null;
   blacklist: BlacklistInfo | null;
   loading: boolean;
   refresh: () => Promise<void>;
@@ -25,6 +27,7 @@ const SessionContext = createContext<SessionContextValue | undefined>(undefined)
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<SessionUser | null>(null);
   const [verification, setVerification] = useState<SessionVerification | null>(null);
+  const [twoFactor, setTwoFactor] = useState<TwoFactorSummary | null>(null);
   const [blacklist, setBlacklist] = useState<BlacklistInfo | null>(null);
   const [loading, setLoading] = useState<boolean>(() => Boolean(getSessionToken()));
 
@@ -33,6 +36,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     if (!token) {
       setUser(null);
       setVerification(null);
+      setTwoFactor(null);
       setBlacklist(null);
       setLoading(false);
       return;
@@ -42,6 +46,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     if (me && me.success) {
       setUser(me.user);
       setVerification(me.verification);
+      setTwoFactor(me.two_factor ?? null);
       setBlacklist(null);
     } else if (me && me.blacklisted) {
       // Keep session token so the user can read the blocked-account page and
@@ -49,10 +54,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // refuses to return it once the bound WeChat ID is blacklisted.
       setUser(null);
       setVerification(null);
+      setTwoFactor(null);
       setBlacklist(me.blacklist ?? null);
     } else {
       setUser(null);
       setVerification(null);
+      setTwoFactor(null);
       setBlacklist(null);
     }
     setLoading(false);
@@ -77,12 +84,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     clearSession();
     setUser(null);
     setVerification(null);
+    setTwoFactor(null);
     setBlacklist(null);
   }, []);
 
   const value: SessionContextValue = {
     user,
     verification,
+    twoFactor,
     blacklist,
     loading,
     refresh,
