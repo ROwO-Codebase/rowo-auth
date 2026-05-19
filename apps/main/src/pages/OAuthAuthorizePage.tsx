@@ -265,17 +265,58 @@ export default function OAuthAuthorizePage() {
         className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8"
       >
         <div className="flex flex-col items-center text-center mb-6">
-          {validation.client.icon_url ? (
-            <img
-              src={validation.client.icon_url}
-              alt=""
-              className="w-12 h-12 rounded-2xl mb-3 object-cover"
-            />
-          ) : (
-            <div className="bg-indigo-100 p-3 rounded-2xl text-indigo-600 mb-3">
-              <ShieldCheck className="w-7 h-7" />
+          {/* Data-transfer diagram: ROwO icon → animated dots → third-party app icon */}
+          <div className="flex items-center justify-center gap-3 sm:gap-4 mb-4">
+            <div className="w-14 h-14 rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden flex items-center justify-center shrink-0">
+              <img
+                src={__ICON_URL__}
+                alt="ROwO"
+                className="w-full h-full object-cover"
+                referrerPolicy="no-referrer"
+              />
             </div>
-          )}
+
+            <div
+              className="relative flex items-center h-6 shrink-0"
+              style={{ width: 80 }}
+              aria-hidden="true"
+            >
+              <div className="absolute left-0 right-0 top-1/2 -translate-y-px h-px bg-gradient-to-r from-slate-200 via-indigo-200 to-slate-200" />
+              {[0, 1, 2].map((i) => (
+                <motion.span
+                  key={i}
+                  className="absolute w-1.5 h-1.5 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.6)]"
+                  style={{ top: 'calc(50% - 3px)' }}
+                  animate={{ x: [0, 74], opacity: [0, 1, 1, 0] }}
+                  transition={{
+                    duration: 1.6,
+                    repeat: Infinity,
+                    delay: i * 0.55,
+                    ease: 'linear',
+                  }}
+                />
+              ))}
+            </div>
+
+            {validation.client.icon_url ? (
+              <div className="w-14 h-14 rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden shrink-0">
+                <img
+                  src={validation.client.icon_url}
+                  alt=""
+                  className="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+            ) : (
+              <div className="w-14 h-14 rounded-2xl bg-indigo-100 text-indigo-600 flex items-center justify-center border border-slate-200 shadow-sm shrink-0">
+                <ShieldCheck className="w-7 h-7" />
+              </div>
+            )}
+          </div>
+          <span className="sr-only">
+            Sharing data from your ROwO account with {validation.client.display_name}.
+          </span>
+
           <h2 className="text-xl font-semibold text-slate-900">
             Continue to {validation.client.display_name}
           </h2>
