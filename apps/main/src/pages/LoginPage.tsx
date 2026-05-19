@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'motion/react';
-import { LogIn, Loader2, AlertTriangle, Info } from 'lucide-react';
+import { LogIn, Loader2, AlertTriangle, Info, ShieldAlert, Mail } from 'lucide-react';
 import { useSession } from '../contexts/SessionContext';
-import { authHeaders } from '@rowo/shared/session';
+import { authHeaders, type BlacklistInfo } from '@rowo/shared/session';
+
+const SUPPORT_EMAIL = 'dev@rowo.link';
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -14,6 +16,7 @@ export default function LoginPage() {
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [message, setMessage] = useState('');
   const [bindNotice, setBindNotice] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState<BlacklistInfo | null>(null);
 
   const bindToken = searchParams.get('bind_token');
   const nextDestination = searchParams.get('next') || '/center';
@@ -36,6 +39,7 @@ export default function LoginPage() {
     e.preventDefault();
     setMessage('');
     setBindNotice(null);
+    setBlocked(null);
     setStatus('loading');
 
     try {
@@ -45,6 +49,13 @@ export default function LoginPage() {
         body: JSON.stringify({ username, password }),
       });
       const data = await res.json();
+
+      if (data.blacklisted && data.blacklist) {
+        setStatus('error');
+        setMessage('');
+        setBlocked(data.blacklist as BlacklistInfo);
+        return;
+      }
 
       if (!data.success || !data.token) {
         setStatus('error');
@@ -138,7 +149,34 @@ export default function LoginPage() {
             />
           </div>
 
-          {status === 'error' && message && (
+          {blocked && (
+            <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 text-sm text-rose-800 space-y-2">
+              <div className="flex items-start gap-2">
+                <ShieldAlert className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-semibold">Account blocked</div>
+                  <div className="text-xs mt-1">
+                    Your bound WeChat ID{' '}
+                    <span className="font-mono break-all">{blocked.wechat_id}</span> is on the
+                    blacklist, so sign-in is disabled.
+                  </div>
+                  <div className="text-xs mt-2">
+                    <span className="font-semibold">Reason:</span>{' '}
+                    {blocked.reason || 'No reason provided.'}
+                  </div>
+                </div>
+              </div>
+              <a
+                href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(`Blacklist appeal — ${blocked.wechat_id}`)}`}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-medium transition-colors"
+              >
+                <Mail className="w-3.5 h-3.5" />
+                Contact support
+              </a>
+            </div>
+          )}
+
+          {status === 'error' && message && !blocked && (
             <div className="bg-red-50 border border-red-100 rounded-xl p-3 flex items-start gap-2 text-sm text-red-700">
               <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
               <span>{message}</span>

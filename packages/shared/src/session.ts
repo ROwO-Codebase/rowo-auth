@@ -63,11 +63,20 @@ export interface SessionVerification {
   missing?: boolean;
 }
 
+export interface BlacklistInfo {
+  wechat_id: string;
+  reason: string;
+  added_by: string;
+  added_at: string;
+}
+
 export interface MeResponse {
   success: boolean;
   user: SessionUser | null;
   verification: SessionVerification | null;
   message?: string;
+  blacklisted?: boolean;
+  blacklist?: BlacklistInfo | null;
 }
 
 function base64UrlDecodeToString(input: string): string {

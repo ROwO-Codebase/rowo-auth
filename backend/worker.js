@@ -372,6 +372,22 @@ async function consumeBindToken(env, token) {
   return { wechatId, method: payload.method || null };
 }
 
+async function buildAccountBlockedResponse(env, user) {
+  if (!user?.wechat_id) return null;
+  const blacklistRecord = await getActiveBlacklistRecord(env, user.wechat_id);
+  if (!blacklistRecord) return null;
+  return jsonResponse(
+    {
+      success: false,
+      message:
+        'Your bound WeChat ID is on the blacklist. Please contact support if you believe this is a mistake.',
+      blacklisted: true,
+      blacklist: buildBlacklistPayload(blacklistRecord),
+    },
+    403
+  );
+}
+
 async function requireUserAuth(request, env) {
   const authHeader = request.headers.get('authorization') || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -391,6 +407,10 @@ async function requireUserAuth(request, env) {
   const user = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [payload.uid]);
   if (!user) {
     return { response: jsonResponse({ success: false, message: 'Account no longer exists.' }, 401) };
+  }
+  const blockedResponse = await buildAccountBlockedResponse(env, user);
+  if (blockedResponse) {
+    return { response: blockedResponse };
   }
   return { user };
 }
@@ -2582,6 +2602,12 @@ async function handleRequest(request, env, ctx) {
       if (!user || !ok) {
         return jsonResponse({ success: false, message: 'Invalid username or password.' }, 401);
       }
+
+      // Reject sign-in when the user's bound WeChat ID has been blacklisted.
+      // Returning the blacklist payload lets the login form show a useful
+      // message instead of a generic 401.
+      const blockedResponse = await buildAccountBlockedResponse(env, user);
+      if (blockedResponse) return blockedResponse;
 
       await execRun(env, "UPDATE user_accounts SET last_login_at = datetime('now') WHERE id = ?", [user.id]);
       const token = await issueUserSessionToken(env, user.id, user.username_display);
