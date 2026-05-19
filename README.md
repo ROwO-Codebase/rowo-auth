@@ -22,11 +22,14 @@ ROwO Auth is a student verification portal that links WeChat IDs to verified stu
 
 ## Project Structure
 
-- `src/`: frontend application
-- `src/pages/`: main pages and verification/admin flows
-- `backend/worker.js`: backend API handler and business logic
-- `package.json`: scripts and frontend build-time config
-- `.env.example`: environment variable template
+This repo is an npm workspaces monorepo:
+
+- `apps/main/`: the consumer-facing site (`rowo.link`) — verification flows, admin panel, user center
+- `apps/developers/`: the developer panel (`developers.rowo.link`) — OAuth client CRUD, API docs, playground
+- `packages/shared/`: code shared by both frontends (session/JWT utilities, common types)
+- `backend/worker.js`: Cloudflare Worker — single API backend serving both apps at `api.rowo.link`
+- `backend/migrations/`: ordered D1 schema migrations
+- `package.json`: workspace root with cross-workspace scripts
 
 ## Prerequisites
 
@@ -36,22 +39,23 @@ ROwO Auth is a student verification portal that links WeChat IDs to verified stu
 
 ## Quick Start (Frontend)
 
-1. Install dependencies:
+1. Install dependencies from the repo root (wires the workspaces together):
    - `npm install`
-2. Configure frontend API target in `package.json`:
-   - `config.api_endpoint`
-   - `config.icon_url`
-3. Start development server:
-   - `npm run dev`
+2. Configure each app's API target in its own `package.json`:
+   - `apps/main/package.json` → `config.api_endpoint`, `config.icon_url`
+   - `apps/developers/package.json` → same fields
+3. Start a dev server:
+   - `npm run dev:main` (port 5173)
+   - `npm run dev:developers` (port 5174)
 4. Open the local Vite URL shown in terminal.
 
 ## Configuration
 
 ### Frontend Build-Time Config
 
-The frontend uses constants from `package.json`:
+Each app reads constants from **its own** `package.json` (`apps/main/package.json`, `apps/developers/package.json`):
 
-- `config.api_endpoint`: base URL used by all frontend API requests
+- `config.api_endpoint`: base URL used by frontend API requests
 - `config.icon_url`: icon URL injected into HTML
 
 These values are exposed as `__API_ENDPOINT__` and `__ICON_URL__` at build time. All OAuth client IDs, scopes, and redirect URIs live on the backend (see `GET /api/oauth/redirect/:provider`); the frontend never constructs OAuth authorize URLs.
@@ -73,13 +77,25 @@ Backend `backend/worker.js` expects runtime bindings/secrets such as:
 
 ## Available Scripts
 
-- `npm run dev`: start frontend dev server
-- `npm run build`: create production frontend build
-- `npm run preview`: preview production build locally
-- `npm run lint`: run TypeScript type-check (`tsc --noEmit`)
+- `npm run dev:main`: start the main site dev server (port 5173)
+- `npm run dev:developers`: start the developer panel dev server (port 5174)
+- `npm run build:main` / `npm run build:developers`: build each frontend to `apps/<name>/dist`
+- `npm run preview:main` / `npm run preview:developers`: preview a production build locally
+- `npm run lint`: TypeScript project-references build (`tsc -b`) across all workspaces
 - `npm run dev:worker`: run Worker locally with Wrangler config
 - `npm run deploy:worker`: deploy Worker using `backend/wrangler.toml`
 - `npm run deploy:worker:prod`: deploy Worker to `production` environment
+
+## Cloudflare Pages Deploy (two projects)
+
+Each frontend deploys as its own Cloudflare Pages project, both connected to this repo:
+
+| CF Pages project | Build command | Output directory | Custom domain |
+|---|---|---|---|
+| `rowo-main` | `npm run build:main` | `apps/main/dist` | `rowo.link` |
+| `rowo-developers` | `npm run build:developers` | `apps/developers/dist` | `developers.rowo.link` |
+
+Leave the *Root directory* setting blank — builds must run from the repo root so npm workspaces resolve. Cloudflare auto-spawns preview deployments for non-production branches.
 
 ## Cloudflare Worker Deploy (CI/CD Ready)
 
@@ -201,6 +217,15 @@ Admin routes:
 - `POST /api/admin/users/:id/reset-password`
 - `POST /api/admin/users/:id/unbind-wechat`
 
+Developer panel routes (any logged-in user; scoped to their own clients):
+
+- `GET /api/developers/oauth-clients`
+- `POST /api/developers/oauth-clients`
+- `GET /api/developers/oauth-clients/:client_id`
+- `PATCH /api/developers/oauth-clients/:client_id`
+- `POST /api/developers/oauth-clients/:client_id/rotate-secret`
+- `DELETE /api/developers/oauth-clients/:client_id`
+
 ## Security Notes
 
 - Never commit real secrets or tokens.
@@ -243,8 +268,8 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 ## Troubleshooting
 
 - Frontend cannot reach backend:
-  - verify `config.api_endpoint` in `package.json`
-  - ensure backend CORS allows your frontend origin
+  - verify `config.api_endpoint` in the relevant app's `package.json` (`apps/main/package.json` or `apps/developers/package.json`)
+  - ensure backend `CORS_ALLOW_ORIGINS` includes your frontend origin
 - Email verification fails:
   - check AWS SES credentials, sender identity, and region
 - Discord verification fails:

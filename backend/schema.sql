@@ -124,6 +124,7 @@ CREATE TABLE oauth_clients (
   allowed_redirect_uris TEXT NOT NULL,
   allowed_scopes TEXT NOT NULL,
   is_active INTEGER NOT NULL DEFAULT 1,
+  owner_user_id TEXT REFERENCES user_accounts(id),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -165,3 +166,6 @@ CREATE INDEX idx_oauth_codes_expires_at
   ON oauth_authorization_codes(expires_at);
 CREATE INDEX idx_oauth_codes_user_id
   ON oauth_authorization_codes(user_id);
+CREATE INDEX idx_oauth_clients_owner
+  ON oauth_clients(owner_user_id)
+  WHERE owner_user_id IS NOT NULL;

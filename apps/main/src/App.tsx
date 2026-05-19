@@ -19,6 +19,7 @@ import SignupPage from './pages/SignupPage';
 import LoginPage from './pages/LoginPage';
 import UserCenterPage from './pages/UserCenterPage';
 import OAuthAuthorizePage from './pages/OAuthAuthorizePage';
+import SsoPage from './pages/SsoPage';
 import { SessionProvider } from './contexts/SessionContext';
 
 function AdfsRedirect() {
@@ -48,6 +49,7 @@ export default function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/center" element={<UserCenterPage />} />
             <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
+            <Route path="/sso" element={<SsoPage />} />
           </Routes>
         </Layout>
       </Router>

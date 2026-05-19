@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { UserPlus, LogIn, Sparkles, CheckCircle2, ArrowRight, AlertTriangle, Loader2, KeyRound } from 'lucide-react';
 import { useSession } from '../contexts/SessionContext';
-import { authHeaders } from '../lib/session';
+import { authHeaders } from '@rowo/shared/session';
 
 interface Props {
   bindToken: string;

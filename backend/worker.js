@@ -1296,6 +1296,113 @@ function buildOAuthRedirect(redirectUri, params) {
   return url.toString();
 }
 
+function serializeDeveloperOauthClient(row) {
+  if (!row) return null;
+  let allowedRedirectUris = [];
+  let allowedScopes = [];
+  try { allowedRedirectUris = parseJsonArrayField(row.allowed_redirect_uris, 'allowed_redirect_uris'); } catch { /* keep [] */ }
+  try { allowedScopes = parseJsonArrayField(row.allowed_scopes, 'allowed_scopes'); } catch { /* keep [] */ }
+  return {
+    client_id: row.client_id,
+    display_name: row.display_name,
+    icon_url: row.icon_url || null,
+    allowed_domain: row.allowed_domain,
+    allowed_redirect_uris: allowedRedirectUris,
+    allowed_scopes: allowedScopes,
+    is_active: Number(row.is_active) === 1,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+// Allowed_domain is a bare hostname (e.g. "example.com"). Redirect URIs must:
+//   - parse as a URL
+//   - use https:// OR http://localhost(:port) (dev exception)
+//   - hostname equals allowed_domain or is a subdomain of it (https only;
+//     localhost http URIs ignore this check)
+function isAcceptableHostname(host) {
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(host);
+}
+
+function validateDeveloperRedirectUri(uri, allowedDomain) {
+  if (typeof uri !== 'string' || uri.length === 0 || uri.length > 2048) return false;
+  let parsed;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (parsed.username || parsed.password || parsed.hash) return false;
+  const host = parsed.hostname.toLowerCase();
+  if (parsed.protocol === 'http:') {
+    return host === 'localhost' || host === '127.0.0.1';
+  }
+  if (parsed.protocol !== 'https:') return false;
+  const domain = String(allowedDomain || '').toLowerCase();
+  return host === domain || host.endsWith('.' + domain);
+}
+
+function validateDeveloperOauthClientInput(input) {
+  const value = {};
+
+  const displayName = typeof input?.display_name === 'string' ? input.display_name.trim() : '';
+  if (!displayName) return { ok: false, message: 'display_name is required.' };
+  if (displayName.length > 200) return { ok: false, message: 'display_name must be 200 characters or less.' };
+  value.display_name = displayName;
+
+  let iconUrl = null;
+  if (input?.icon_url != null && String(input.icon_url).trim() !== '') {
+    const raw = String(input.icon_url).trim();
+    if (raw.length > 500) return { ok: false, message: 'icon_url must be 500 characters or less.' };
+    let parsed;
+    try { parsed = new URL(raw); } catch { return { ok: false, message: 'icon_url must be a valid URL.' }; }
+    if (parsed.protocol !== 'https:') return { ok: false, message: 'icon_url must use https://.' };
+    iconUrl = raw;
+  }
+  value.icon_url = iconUrl;
+
+  const allowedDomain = typeof input?.allowed_domain === 'string' ? input.allowed_domain.trim().toLowerCase() : '';
+  if (!allowedDomain) return { ok: false, message: 'allowed_domain is required.' };
+  if (!isAcceptableHostname(allowedDomain)) {
+    return { ok: false, message: 'allowed_domain must be a valid hostname (e.g. example.com).' };
+  }
+  value.allowed_domain = allowedDomain;
+
+  const rawUris = input?.allowed_redirect_uris;
+  if (!Array.isArray(rawUris) || rawUris.length === 0) {
+    return { ok: false, message: 'allowed_redirect_uris must be a non-empty array.' };
+  }
+  if (rawUris.length > 10) {
+    return { ok: false, message: 'allowed_redirect_uris may contain at most 10 entries.' };
+  }
+  const uris = [];
+  for (const entry of rawUris) {
+    const uri = typeof entry === 'string' ? entry.trim() : '';
+    if (!validateDeveloperRedirectUri(uri, allowedDomain)) {
+      return { ok: false, message: `Redirect URI "${uri}" must be https:// and match ${allowedDomain} (or http://localhost for dev).` };
+    }
+    if (!uris.includes(uri)) uris.push(uri);
+  }
+  value.allowed_redirect_uris = uris;
+
+  const rawScopes = input?.allowed_scopes;
+  if (!Array.isArray(rawScopes) || rawScopes.length === 0) {
+    return { ok: false, message: 'allowed_scopes must be a non-empty array.' };
+  }
+  const scopes = [];
+  for (const entry of rawScopes) {
+    const scope = typeof entry === 'string' ? entry.trim() : '';
+    if (!OAUTH_VALID_SCOPES.has(scope)) {
+      return { ok: false, message: `Unknown scope "${scope}".` };
+    }
+    if (!scopes.includes(scope)) scopes.push(scope);
+  }
+  if (!scopes.includes('basic')) scopes.unshift('basic');
+  value.allowed_scopes = scopes;
+
+  return { ok: true, value };
+}
+
 async function handleRequest(request, env, ctx) {
 
     const url = new URL(request.url);
@@ -3915,6 +4022,216 @@ async function handleRequest(request, env, ctx) {
       }
       if (partial) response.partial = true;
       return jsonResponse(response);
+    }
+
+    // --------------------------------------------------------------------
+    // Developer panel: OAuth client self-service CRUD.
+    // Any logged-in user may create + manage their own clients. Rows with
+    // owner_user_id NULL are maintainer-owned and not exposed here.
+    // --------------------------------------------------------------------
+
+    const DEVELOPER_OAUTH_CLIENT_CAP = 25;
+
+    if (method === 'GET' && pathname === '/api/developers/oauth-clients') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const rows = await queryAll(
+        env,
+        `SELECT client_id, display_name, icon_url, allowed_domain, allowed_redirect_uris,
+                allowed_scopes, is_active, created_at, updated_at
+           FROM oauth_clients
+          WHERE owner_user_id = ?
+          ORDER BY datetime(created_at) DESC`,
+        [auth.user.id]
+      );
+      const clients = rows.map((row) => serializeDeveloperOauthClient(row));
+      return jsonResponse({ success: true, clients });
+    }
+
+    if (method === 'POST' && pathname === '/api/developers/oauth-clients') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const validation = validateDeveloperOauthClientInput(body, { requireAll: true });
+      if (!validation.ok) {
+        return jsonResponse({ success: false, message: validation.message }, 400);
+      }
+      const countRow = await queryFirst(
+        env,
+        'SELECT COUNT(*) AS n FROM oauth_clients WHERE owner_user_id = ?',
+        [auth.user.id]
+      );
+      if (Number(countRow?.n || 0) >= DEVELOPER_OAUTH_CLIENT_CAP) {
+        return jsonResponse({
+          success: false,
+          message: `You have reached the limit of ${DEVELOPER_OAUTH_CLIENT_CAP} OAuth clients.`,
+        }, 409);
+      }
+      const clientId = randomHex(16);
+      const clientSecret = randomHex(32);
+      let clientSecretHmac;
+      try {
+        clientSecretHmac = await hmacSensitive(env, 'oauth_client_secret', clientSecret);
+      } catch (error) {
+        return genericError('developer_oauth_create_hmac', error, 500, 'Server configuration error.');
+      }
+      try {
+        await execRun(
+          env,
+          `INSERT INTO oauth_clients
+             (client_id, client_secret_hmac, display_name, icon_url, allowed_domain,
+              allowed_redirect_uris, allowed_scopes, is_active, owner_user_id,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'))`,
+          [
+            clientId,
+            clientSecretHmac,
+            validation.value.display_name,
+            validation.value.icon_url,
+            validation.value.allowed_domain,
+            JSON.stringify(validation.value.allowed_redirect_uris),
+            JSON.stringify(validation.value.allowed_scopes),
+            auth.user.id,
+          ]
+        );
+      } catch (error) {
+        return genericError('developer_oauth_create_insert', error);
+      }
+      const row = await queryFirst(
+        env,
+        `SELECT client_id, display_name, icon_url, allowed_domain, allowed_redirect_uris,
+                allowed_scopes, is_active, created_at, updated_at
+           FROM oauth_clients WHERE client_id = ?`,
+        [clientId]
+      );
+      return jsonResponse({
+        success: true,
+        client: serializeDeveloperOauthClient(row),
+        client_secret: clientSecret,
+        message: 'Save the client_secret now. It will not be shown again.',
+      });
+    }
+
+    {
+      const clientRouteMatch = pathname.match(
+        /^\/api\/developers\/oauth-clients\/([A-Za-z0-9_-]+)(\/rotate-secret)?$/
+      );
+      if (clientRouteMatch) {
+        const targetClientId = clientRouteMatch[1];
+        const isRotate = Boolean(clientRouteMatch[2]);
+        const auth = await requireUserAuth(request, env);
+        if (auth.response) return auth.response;
+        const row = await queryFirst(
+          env,
+          'SELECT * FROM oauth_clients WHERE client_id = ? AND owner_user_id = ?',
+          [targetClientId, auth.user.id]
+        );
+        if (!row) {
+          return jsonResponse({ success: false, message: 'OAuth client not found.' }, 404);
+        }
+
+        if (method === 'GET' && !isRotate) {
+          return jsonResponse({ success: true, client: serializeDeveloperOauthClient(row) });
+        }
+
+        if (method === 'PATCH' && !isRotate) {
+          const body = await parseJson(request);
+          const merged = {
+            display_name: body.display_name !== undefined ? body.display_name : row.display_name,
+            icon_url: body.icon_url !== undefined ? body.icon_url : row.icon_url,
+            allowed_domain: body.allowed_domain !== undefined ? body.allowed_domain : row.allowed_domain,
+            allowed_redirect_uris: body.allowed_redirect_uris !== undefined
+              ? body.allowed_redirect_uris
+              : parseJsonArrayField(row.allowed_redirect_uris, 'allowed_redirect_uris'),
+            allowed_scopes: body.allowed_scopes !== undefined
+              ? body.allowed_scopes
+              : parseJsonArrayField(row.allowed_scopes, 'allowed_scopes'),
+          };
+          const validation = validateDeveloperOauthClientInput(merged, { requireAll: true });
+          if (!validation.ok) {
+            return jsonResponse({ success: false, message: validation.message }, 400);
+          }
+          const nextActive = body.is_active === undefined
+            ? row.is_active
+            : (body.is_active ? 1 : 0);
+          try {
+            await execRun(
+              env,
+              `UPDATE oauth_clients
+                  SET display_name = ?, icon_url = ?, allowed_domain = ?,
+                      allowed_redirect_uris = ?, allowed_scopes = ?, is_active = ?,
+                      updated_at = datetime('now')
+                WHERE client_id = ? AND owner_user_id = ?`,
+              [
+                validation.value.display_name,
+                validation.value.icon_url,
+                validation.value.allowed_domain,
+                JSON.stringify(validation.value.allowed_redirect_uris),
+                JSON.stringify(validation.value.allowed_scopes),
+                nextActive,
+                targetClientId,
+                auth.user.id,
+              ]
+            );
+          } catch (error) {
+            return genericError('developer_oauth_update', error);
+          }
+          const updated = await queryFirst(
+            env,
+            `SELECT client_id, display_name, icon_url, allowed_domain, allowed_redirect_uris,
+                    allowed_scopes, is_active, created_at, updated_at
+               FROM oauth_clients WHERE client_id = ?`,
+            [targetClientId]
+          );
+          return jsonResponse({ success: true, client: serializeDeveloperOauthClient(updated) });
+        }
+
+        if (method === 'POST' && isRotate) {
+          const newSecret = randomHex(32);
+          let newHmac;
+          try {
+            newHmac = await hmacSensitive(env, 'oauth_client_secret', newSecret);
+          } catch (error) {
+            return genericError('developer_oauth_rotate_hmac', error, 500, 'Server configuration error.');
+          }
+          try {
+            await execRun(
+              env,
+              `UPDATE oauth_clients
+                  SET client_secret_hmac = ?, updated_at = datetime('now')
+                WHERE client_id = ? AND owner_user_id = ?`,
+              [newHmac, targetClientId, auth.user.id]
+            );
+          } catch (error) {
+            return genericError('developer_oauth_rotate_update', error);
+          }
+          return jsonResponse({
+            success: true,
+            client_secret: newSecret,
+            message: 'Save the new client_secret now. It will not be shown again.',
+          });
+        }
+
+        if (method === 'DELETE' && !isRotate) {
+          try {
+            await execRun(
+              env,
+              'DELETE FROM oauth_authorization_codes WHERE client_id = ?',
+              [targetClientId]
+            );
+            await execRun(
+              env,
+              'DELETE FROM oauth_clients WHERE client_id = ? AND owner_user_id = ?',
+              [targetClientId, auth.user.id]
+            );
+          } catch (error) {
+            return genericError('developer_oauth_delete', error);
+          }
+          return jsonResponse({ success: true });
+        }
+
+        return jsonResponse({ success: false, message: 'Method not allowed.' }, 405);
+      }
     }
 
   return jsonResponse({ success: false, message: 'Route not found.' }, 404);
