@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { ShieldCheck, Lock, Users, Server, Github, ExternalLink, Shield, Mail } from 'lucide-react';
+import { ShieldCheck, Lock, Users, Server, Github, ExternalLink, Shield, Mail, KeyRound, FlaskConical, BookOpen } from 'lucide-react';
 
 export default function AboutPage() {
   const commitHash = (__GIT_COMMIT_HASH__ || 'unknown').trim();
@@ -140,21 +140,24 @@ export default function AboutPage() {
               <Server className="w-6 h-6 text-blue-400" />
               For Developers
             </h2>
+            <p className="text-slate-300 text-lg leading-relaxed mb-6">
+              Build apps that let users sign in with their ROwO account. Register an OAuth client, request the scopes you need, and start authenticating users in minutes.
+            </p>
             <ul className="space-y-4 text-slate-300 mb-8">
               <li className="flex items-start gap-3">
-                <div className="w-2 h-2 rounded-full bg-blue-400 mt-2.5 shrink-0 shadow-[0_0_8px_rgba(96,165,250,0.6)]" />
-                <span className="text-lg">Simple API for querying verification status.</span>
+                <KeyRound className="w-5 h-5 text-blue-400 mt-1 shrink-0" />
+                <span className="text-lg"><strong className="text-white">Sign in with ROwO</strong> — standard OAuth 2.0 authorization-code flow with verified-student scopes.</span>
               </li>
               <li className="flex items-start gap-3">
-                <div className="w-2 h-2 rounded-full bg-blue-400 mt-2.5 shrink-0 shadow-[0_0_8px_rgba(96,165,250,0.6)]" />
-                <span className="text-lg">Reduce duplicate verification efforts.</span>
+                <BookOpen className="w-5 h-5 text-blue-400 mt-1 shrink-0" />
+                <span className="text-lg"><strong className="text-white">API documentation</strong> — every endpoint with request and response shapes.</span>
               </li>
               <li className="flex items-start gap-3">
-                <div className="w-2 h-2 rounded-full bg-blue-400 mt-2.5 shrink-0 shadow-[0_0_8px_rgba(96,165,250,0.6)]" />
-                <span className="text-lg">Reliable infrastructure backed by PiTrick Technology.</span>
+                <FlaskConical className="w-5 h-5 text-blue-400 mt-1 shrink-0" />
+                <span className="text-lg"><strong className="text-white">Interactive playground</strong> — call any endpoint with your own credentials, straight from the browser.</span>
               </li>
             </ul>
-            
+
             <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-2xl p-5 mb-8">
               <p className="text-sm text-blue-200 leading-relaxed">
                 <strong className="text-blue-400">Open Source:</strong> ROwO Auth is now open source. You can review the codebase, report issues, and contribute improvements through our public GitHub repository.
@@ -163,14 +166,23 @@ export default function AboutPage() {
 
             <div className="flex flex-wrap items-center gap-3">
               <a
-                href="https://github.com/Pitrick3141/rowo-auth"
+                href="https://developers.rowo.link"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-6 py-3 bg-blue-500 text-white rounded-xl font-medium hover:bg-blue-400 transition-all shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 transform hover:-translate-y-0.5"
               >
+                <Server className="w-5 h-5" />
+                Open Developer Panel
+                <ExternalLink className="w-4 h-4" />
+              </a>
+              <a
+                href="https://github.com/Pitrick3141/rowo-auth"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-6 py-3 bg-slate-700 text-white rounded-xl font-medium hover:bg-slate-600 transition-colors"
+              >
                 <Github className="w-5 h-5" />
                 View on GitHub
-                <ExternalLink className="w-4 h-4" />
               </a>
               <a
                 href="mailto:dev@rowo.link"
