@@ -16,14 +16,16 @@ export function ModalShell({ onClose, title, icon, children }: Props) {
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
-      onClick={onClose}
     >
+      {/* No backdrop click-to-dismiss: 2FA setup/recovery flows show data
+          (QR secret, recovery codes) that's lost if the modal closes
+          accidentally. The X button and Cancel/Done buttons are the only
+          ways out. */}
       <motion.div
         initial={{ scale: 0.95, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.95, opacity: 0 }}
         className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 sm:p-8 relative max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
       >
         <button
           onClick={onClose}
