@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { LogIn, Loader2, AlertTriangle, Info } from 'lucide-react';
 import { useSession } from '../contexts/SessionContext';
-import { authHeaders } from '../lib/session';
+import { authHeaders } from '@rowo/shared/session';
 
 export default function LoginPage() {
   const navigate = useNavigate();

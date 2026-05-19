@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { ShieldCheck, Loader2, AlertTriangle, Lock, XCircle } from 'lucide-react';
 import { useSession } from '../contexts/SessionContext';
-import { authHeaders } from '../lib/session';
+import { authHeaders } from '@rowo/shared/session';
 
 // IMPORTANT: redirect_uri is attacker-controlled until the backend has matched
 // it against oauth_clients.allowed_redirect_uris. This page never constructs

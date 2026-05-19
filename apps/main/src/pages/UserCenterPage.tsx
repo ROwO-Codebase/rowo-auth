@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { User, ShieldCheck, KeyRound, RefreshCw, LogOut, Link2, Loader2, AlertCircle, X, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { useSession } from '../contexts/SessionContext';
-import { authHeaders } from '../lib/session';
+import { authHeaders } from '@rowo/shared/session';
 
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 

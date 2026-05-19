@@ -7,7 +7,7 @@ import {
   subscribeSession,
   type SessionUser,
   type SessionVerification,
-} from '../lib/session';
+} from '@rowo/shared/session';
 
 interface SessionContextValue {
   user: SessionUser | null;

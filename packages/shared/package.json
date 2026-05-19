@@ -1,0 +1,9 @@
+{
+  "name": "@rowo/shared",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    "./session": "./src/session.ts"
+  }
+}

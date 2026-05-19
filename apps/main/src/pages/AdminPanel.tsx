@@ -6,7 +6,7 @@ import { format } from 'date-fns';
 import { clsx } from 'clsx';
 import ReactMarkdown from 'react-markdown';
 import { useSession } from '../contexts/SessionContext';
-import { authHeaders, hasMinRole, type RowoRole } from '../lib/session';
+import { authHeaders, hasMinRole, type RowoRole } from '@rowo/shared/session';
 
 const PAGE_SIZE = 50;
 
