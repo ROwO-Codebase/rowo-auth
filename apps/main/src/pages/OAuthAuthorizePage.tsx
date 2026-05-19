@@ -1,9 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'motion/react';
-import { ShieldCheck, Loader2, AlertTriangle, Lock, XCircle } from 'lucide-react';
+import { ShieldCheck, Loader2, AlertTriangle, Lock, XCircle, Shield } from 'lucide-react';
 import { useSession } from '../contexts/SessionContext';
-import { authHeaders } from '@rowo/shared/session';
+import { authHeaders, type TwoFactorMethod } from '@rowo/shared/session';
+import {
+  TwoFactorChallengeForm,
+  type TwoFactorSubmitValues,
+} from '../components/2fa/TwoFactorChallengeForm';
 
 // IMPORTANT: redirect_uri is attacker-controlled until the backend has matched
 // it against oauth_clients.allowed_redirect_uris. This page never constructs
@@ -70,7 +74,7 @@ function scopeDescription(scope: string): string {
 export default function OAuthAuthorizePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { user, loading: sessionLoading } = useSession();
+  const { user, twoFactor, loading: sessionLoading } = useSession();
 
   const clientId = searchParams.get('client_id') || '';
   const redirectUri = searchParams.get('redirect_uri') || '';
@@ -83,6 +87,7 @@ export default function OAuthAuthorizePage() {
   const [approvedScopes, setApprovedScopes] = useState<Set<string>>(new Set());
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [available2faMethods, setAvailable2faMethods] = useState<TwoFactorMethod[]>([]);
 
   const validateOnceRef = useRef(false);
 
@@ -100,6 +105,31 @@ export default function OAuthAuthorizePage() {
     }
     setStatus('checking_session');
   }, [status, clientId, redirectUri]);
+
+  useEffect(() => {
+    if (!twoFactor) {
+      setAvailable2faMethods([]);
+      return;
+    }
+    const methods: TwoFactorMethod[] = [];
+    if (twoFactor.totp_enabled) methods.push('totp');
+    if (twoFactor.passkeys.length > 0) methods.push('passkey');
+    if (twoFactor.recovery_codes_remaining > 0) methods.push('recovery');
+    setAvailable2faMethods(methods);
+  }, [twoFactor]);
+
+  const twoFactorRequired = available2faMethods.length > 0;
+
+  const fetchPasskeyChallenge = async () => {
+    const res = await fetch(`${__API_ENDPOINT__}/api/user/2fa/passkey/challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ purpose: 'oauth' }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Could not fetch passkey challenge.');
+    return { options: data.options, challenge_token: data.challenge_token };
+  };
 
   useEffect(() => {
     if (status !== 'checking_session') return;
@@ -153,7 +183,7 @@ export default function OAuthAuthorizePage() {
     });
   };
 
-  const handleApprove = async () => {
+  const handleApprove = async (factor: TwoFactorSubmitValues = {}) => {
     if (!validation) return;
     setSubmitError(null);
     setStatus('submitting');
@@ -167,10 +197,14 @@ export default function OAuthAuthorizePage() {
           scope,
           state,
           approved_scopes: Array.from(approvedScopes),
+          ...factor,
         }),
       });
       const data = await res.json();
       if (!res.ok || !data.success || !data.redirect_url) {
+        if (data.two_factor_required && Array.isArray(data.available_methods)) {
+          setAvailable2faMethods(data.available_methods);
+        }
         setSubmitError(data.message || 'Could not complete the authorization.');
         setStatus('ready');
         return;
@@ -265,17 +299,58 @@ export default function OAuthAuthorizePage() {
         className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8"
       >
         <div className="flex flex-col items-center text-center mb-6">
-          {validation.client.icon_url ? (
-            <img
-              src={validation.client.icon_url}
-              alt=""
-              className="w-12 h-12 rounded-2xl mb-3 object-cover"
-            />
-          ) : (
-            <div className="bg-indigo-100 p-3 rounded-2xl text-indigo-600 mb-3">
-              <ShieldCheck className="w-7 h-7" />
+          {/* Data-transfer diagram: ROwO icon → animated dots → third-party app icon */}
+          <div className="flex items-center justify-center gap-3 sm:gap-4 mb-4">
+            <div className="w-14 h-14 rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden flex items-center justify-center shrink-0">
+              <img
+                src={__ICON_URL__}
+                alt="ROwO"
+                className="w-full h-full object-cover"
+                referrerPolicy="no-referrer"
+              />
             </div>
-          )}
+
+            <div
+              className="relative flex items-center h-6 shrink-0"
+              style={{ width: 80 }}
+              aria-hidden="true"
+            >
+              <div className="absolute left-0 right-0 top-1/2 -translate-y-px h-px bg-gradient-to-r from-slate-200 via-indigo-200 to-slate-200" />
+              {[0, 1, 2].map((i) => (
+                <motion.span
+                  key={i}
+                  className="absolute w-1.5 h-1.5 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.6)]"
+                  style={{ top: 'calc(50% - 3px)' }}
+                  animate={{ x: [0, 74], opacity: [0, 1, 1, 0] }}
+                  transition={{
+                    duration: 1.6,
+                    repeat: Infinity,
+                    delay: i * 0.55,
+                    ease: 'linear',
+                  }}
+                />
+              ))}
+            </div>
+
+            {validation.client.icon_url ? (
+              <div className="w-14 h-14 rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden shrink-0">
+                <img
+                  src={validation.client.icon_url}
+                  alt=""
+                  className="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+            ) : (
+              <div className="w-14 h-14 rounded-2xl bg-indigo-100 text-indigo-600 flex items-center justify-center border border-slate-200 shadow-sm shrink-0">
+                <ShieldCheck className="w-7 h-7" />
+              </div>
+            )}
+          </div>
+          <span className="sr-only">
+            Sharing data from your ROwO account with {validation.client.display_name}.
+          </span>
+
           <h2 className="text-xl font-semibold text-slate-900">
             Continue to {validation.client.display_name}
           </h2>
@@ -338,22 +413,41 @@ export default function OAuthAuthorizePage() {
           </p>
         )}
 
-        {submitError && (
+        {twoFactorRequired && (
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Shield className="w-4 h-4 text-indigo-600" />
+              <div className="text-sm font-medium text-slate-900">Confirm with 2FA</div>
+            </div>
+            <TwoFactorChallengeForm
+              availableMethods={available2faMethods}
+              onSubmit={(factor) => handleApprove(factor)}
+              busy={status === 'submitting'}
+              errorMessage={submitError}
+              fetchPasskeyChallenge={fetchPasskeyChallenge}
+              compact
+            />
+          </div>
+        )}
+
+        {!twoFactorRequired && submitError && (
           <div className="bg-red-50 border border-red-100 rounded-xl p-3 mb-4 flex items-start gap-2 text-sm text-red-700">
             <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
             <span>{submitError}</span>
           </div>
         )}
 
-        <button
-          type="button"
-          onClick={handleApprove}
-          disabled={status === 'submitting'}
-          className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-medium rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2"
-        >
-          {status === 'submitting' ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-          {status === 'submitting' ? 'Working…' : 'Continue'}
-        </button>
+        {!twoFactorRequired && (
+          <button
+            type="button"
+            onClick={() => handleApprove()}
+            disabled={status === 'submitting'}
+            className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-medium rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2"
+          >
+            {status === 'submitting' ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+            {status === 'submitting' ? 'Working…' : 'Continue'}
+          </button>
+        )}
         <button
           type="button"
           onClick={handleDeny}

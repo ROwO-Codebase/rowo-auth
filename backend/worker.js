@@ -1,3 +1,10 @@
+import {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} from '@simplewebauthn/server';
+
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -372,6 +379,22 @@ async function consumeBindToken(env, token) {
   return { wechatId, method: payload.method || null };
 }
 
+async function buildAccountBlockedResponse(env, user) {
+  if (!user?.wechat_id) return null;
+  const blacklistRecord = await getActiveBlacklistRecord(env, user.wechat_id);
+  if (!blacklistRecord) return null;
+  return jsonResponse(
+    {
+      success: false,
+      message:
+        'Your bound WeChat ID is on the blacklist. Please contact support if you believe this is a mistake.',
+      blacklisted: true,
+      blacklist: buildBlacklistPayload(blacklistRecord),
+    },
+    403
+  );
+}
+
 async function requireUserAuth(request, env) {
   const authHeader = request.headers.get('authorization') || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -391,6 +414,10 @@ async function requireUserAuth(request, env) {
   const user = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [payload.uid]);
   if (!user) {
     return { response: jsonResponse({ success: false, message: 'Account no longer exists.' }, 401) };
+  }
+  const blockedResponse = await buildAccountBlockedResponse(env, user);
+  if (blockedResponse) {
+    return { response: blockedResponse };
   }
   return { user };
 }
@@ -471,6 +498,515 @@ function publicUserShape(user) {
     password_changed_at: user.password_changed_at || null,
     role: user.role || 'user',
   };
+}
+
+// ----------------------------------------------------------------------------
+// Two-Factor Authentication: TOTP (RFC 6238 from scratch), WebAuthn passkeys
+// (via @simplewebauthn/server), recovery codes (PBKDF2 same format as
+// password_hash). TOTP secrets are AES-GCM encrypted with TWO_FACTOR_ENC_KEY;
+// passkey challenges are stateless 5-min JWTs (matches existing bind-token
+// pattern). See plans/add-2fa-options-in-generic-hearth.md.
+// ----------------------------------------------------------------------------
+
+const TOTP_PERIOD_SECONDS = 30;
+const TOTP_DIGITS = 6;
+const TOTP_WINDOW = 1; // ±1 step drift (30s before / after)
+const TOTP_SECRET_BYTES = 20; // 160 bits, RFC 4226 minimum
+const TWO_FACTOR_RATE_LIMIT_PER_MINUTE = 10;
+const TWO_FACTOR_CHALLENGE_TTL_SECONDS = 5 * 60;
+const TOTP_SETUP_TTL_SECONDS = 10 * 60;
+const RECOVERY_CODE_COUNT = 10;
+
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+function base32Encode(bytes) {
+  let out = '';
+  let bits = 0;
+  let value = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    value = (value << 8) | bytes[i];
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      out += BASE32_ALPHABET[(value >>> bits) & 0x1f];
+    }
+  }
+  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 0x1f];
+  return out;
+}
+
+function base32Decode(str) {
+  const clean = String(str || '').toUpperCase().replace(/=+$/, '').replace(/\s+/g, '');
+  let bits = 0;
+  let value = 0;
+  const out = [];
+  for (let i = 0; i < clean.length; i++) {
+    const idx = BASE32_ALPHABET.indexOf(clean[i]);
+    if (idx === -1) throw new Error('Invalid base32 input.');
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((value >>> bits) & 0xff);
+    }
+  }
+  return new Uint8Array(out);
+}
+
+function generateTotpSecret() {
+  const bytes = new Uint8Array(TOTP_SECRET_BYTES);
+  crypto.getRandomValues(bytes);
+  return bytes;
+}
+
+async function hotpAt(secretBytes, counter) {
+  const counterBytes = new Uint8Array(8);
+  const view = new DataView(counterBytes.buffer);
+  view.setBigUint64(0, BigInt(counter), false);
+  const key = await crypto.subtle.importKey(
+    'raw', secretBytes, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']
+  );
+  const hmac = new Uint8Array(await crypto.subtle.sign('HMAC', key, counterBytes));
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const bin =
+    ((hmac[offset] & 0x7f) << 24) |
+    ((hmac[offset + 1] & 0xff) << 16) |
+    ((hmac[offset + 2] & 0xff) << 8) |
+    (hmac[offset + 3] & 0xff);
+  return String(bin % 10 ** TOTP_DIGITS).padStart(TOTP_DIGITS, '0');
+}
+
+function currentTotpCounter() {
+  return Math.floor(Date.now() / 1000 / TOTP_PERIOD_SECONDS);
+}
+
+async function verifyTotpCode(secretBytes, code, lastUsedCounter) {
+  if (!/^\d{6}$/.test(String(code || ''))) return { ok: false };
+  const now = currentTotpCounter();
+  const target = String(code);
+  for (let drift = -TOTP_WINDOW; drift <= TOTP_WINDOW; drift++) {
+    const counter = now + drift;
+    if (lastUsedCounter != null && counter <= Number(lastUsedCounter)) continue;
+    const expected = await hotpAt(secretBytes, counter);
+    if (timingSafeEqual(
+      new TextEncoder().encode(expected),
+      new TextEncoder().encode(target),
+    )) {
+      return { ok: true, counter };
+    }
+  }
+  return { ok: false };
+}
+
+function buildOtpauthUri(secretBytes, accountName, issuer = 'ROwO') {
+  const secretB32 = base32Encode(secretBytes);
+  const label = encodeURIComponent(`${issuer}:${accountName}`);
+  const params = new URLSearchParams({
+    secret: secretB32,
+    issuer,
+    algorithm: 'SHA1',
+    digits: String(TOTP_DIGITS),
+    period: String(TOTP_PERIOD_SECONDS),
+  });
+  return { uri: `otpauth://totp/${label}?${params}`, secret_base32: secretB32 };
+}
+
+function getTwoFactorEncKey(env) {
+  const b64 = env.TWO_FACTOR_ENC_KEY;
+  if (!b64 || typeof b64 !== 'string') {
+    throw new Error('TWO_FACTOR_ENC_KEY is required for two-factor auth.');
+  }
+  const raw = base64ToBytes(b64);
+  if (raw.length !== 32) {
+    throw new Error('TWO_FACTOR_ENC_KEY must decode to 32 bytes (256 bits).');
+  }
+  return raw;
+}
+
+async function aesGcmEncrypt(env, plaintextBytes) {
+  const keyBytes = getTwoFactorEncKey(env);
+  const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintextBytes)
+  );
+  return `v1:aesgcm:${bytesToBase64(iv)}:${bytesToBase64(ct)}`;
+}
+
+async function aesGcmDecrypt(env, stored) {
+  const parts = String(stored).split(':');
+  if (parts.length !== 4 || parts[0] !== 'v1' || parts[1] !== 'aesgcm') {
+    throw new Error('Bad encrypted payload format.');
+  }
+  const iv = base64ToBytes(parts[2]);
+  const ct = base64ToBytes(parts[3]);
+  const keyBytes = getTwoFactorEncKey(env);
+  const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['decrypt']);
+  const pt = new Uint8Array(
+    await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct)
+  );
+  return pt;
+}
+
+function generateRecoveryCode() {
+  // 10 chars base32 → "xxxxx-xxxxx" (~50 bits entropy).
+  const bytes = new Uint8Array(7);
+  crypto.getRandomValues(bytes);
+  const raw = base32Encode(bytes).slice(0, 10).toLowerCase();
+  return `${raw.slice(0, 5)}-${raw.slice(5)}`;
+}
+
+function normalizeRecoveryCode(input) {
+  return String(input || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+async function generateRecoveryCodeBatch() {
+  const codes = [];
+  for (let i = 0; i < RECOVERY_CODE_COUNT; i++) codes.push(generateRecoveryCode());
+  return codes;
+}
+
+async function issueRecoveryCodesForUser(env, userId) {
+  await execRun(env, 'DELETE FROM user_recovery_codes WHERE user_id = ?', [userId]);
+  const codes = await generateRecoveryCodeBatch();
+  const batchRow = await queryFirst(
+    env,
+    'SELECT IFNULL(MAX(batch_id), 0) AS max_batch FROM user_recovery_codes WHERE user_id = ?',
+    [userId]
+  );
+  const nextBatch = Number(batchRow?.max_batch || 0) + 1;
+  for (const code of codes) {
+    const hash = await hashPassword(normalizeRecoveryCode(code));
+    await execRun(
+      env,
+      `INSERT INTO user_recovery_codes (user_id, code_hash, batch_id, created_at)
+       VALUES (?, ?, ?, datetime('now'))`,
+      [userId, hash, nextBatch]
+    );
+  }
+  return codes;
+}
+
+function bytesToBase64Url(bytes) {
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const bin = Array.from(arr, (b) => String.fromCodePoint(b)).join('');
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function issueWebauthnChallengeJwt(env, userId, kind, challengeB64url) {
+  const now = Math.floor(Date.now() / 1000);
+  return signRowoJwt(env, {
+    iss: 'rowo-auth',
+    sub: kind,
+    uid: userId,
+    challenge: challengeB64url,
+    iat: now,
+    exp: now + TWO_FACTOR_CHALLENGE_TTL_SECONDS,
+    jti: randomHex(16),
+  });
+}
+
+function getRpInfo(request, env) {
+  const origin = request.headers.get('origin') || '';
+  const allowed = String(env.CORS_ALLOW_ORIGINS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  if (!origin || !allowed.includes(origin)) {
+    throw new Error('Origin not allowed for WebAuthn.');
+  }
+  const url = new URL(origin);
+  return { rpID: url.hostname, rpName: 'ROwO', origin };
+}
+
+async function getTwoFactorSummary(env, userId) {
+  const totp = await queryFirst(
+    env,
+    'SELECT user_id FROM user_totp_credentials WHERE user_id = ? AND confirmed_at IS NOT NULL',
+    [userId]
+  );
+  const passkeys = await queryAll(
+    env,
+    `SELECT id, nickname, created_at, last_used_at, device_type, backed_up
+       FROM user_passkey_credentials WHERE user_id = ? ORDER BY created_at ASC`,
+    [userId]
+  );
+  const recovery = await queryFirst(
+    env,
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN used_at IS NULL THEN 1 ELSE 0 END) AS remaining,
+            MAX(batch_id) AS current_batch,
+            MIN(created_at) AS generated_at
+       FROM user_recovery_codes WHERE user_id = ?`,
+    [userId]
+  );
+  return {
+    totp_enabled: Boolean(totp),
+    passkeys: passkeys.map((p) => ({
+      id: p.id,
+      nickname: p.nickname,
+      created_at: p.created_at,
+      last_used_at: p.last_used_at || null,
+      device_type: p.device_type || null,
+      backed_up: Number(p.backed_up) === 1,
+    })),
+    recovery_codes_remaining: Number(recovery?.remaining ?? 0),
+    recovery_codes_total: Number(recovery?.total ?? 0),
+    recovery_codes_batch_id: recovery?.current_batch != null ? Number(recovery.current_batch) : null,
+    recovery_codes_generated_at: recovery?.generated_at || null,
+  };
+}
+
+async function isTwoFactorEnabled(env, userId) {
+  const s = await getTwoFactorSummary(env, userId);
+  return s.totp_enabled || s.passkeys.length > 0;
+}
+
+async function consumeTwoFactorRateLimit(env, bucketKey) {
+  await execRun(
+    env,
+    `INSERT INTO two_factor_attempts (bucket_key, attempt_count, created_at, updated_at)
+     VALUES (?, 0, datetime('now'), datetime('now'))
+     ON CONFLICT(bucket_key) DO NOTHING`,
+    [bucketKey]
+  );
+  const updateResult = await execRun(
+    env,
+    `UPDATE two_factor_attempts
+       SET attempt_count = attempt_count + 1, updated_at = datetime('now')
+     WHERE bucket_key = ? AND attempt_count < ?`,
+    [bucketKey, TWO_FACTOR_RATE_LIMIT_PER_MINUTE]
+  );
+  const changed = Number(updateResult?.meta?.changes || 0);
+  if (changed === 0) {
+    return { allowed: false, retryAfterSeconds: 60 - new Date().getSeconds() };
+  }
+  await execRun(
+    env,
+    'DELETE FROM two_factor_attempts WHERE updated_at < ?',
+    [new Date(Date.now() - 10 * 60 * 1000).toISOString()]
+  );
+  return { allowed: true };
+}
+
+function listTwoFactorMethods(summary) {
+  const methods = [];
+  if (summary.totp_enabled) methods.push('totp');
+  if (summary.passkeys.length > 0) methods.push('passkey');
+  if (summary.recovery_codes_remaining > 0) methods.push('recovery');
+  return methods;
+}
+
+async function consumeRecoveryCode(env, userId, plain) {
+  const normalized = normalizeRecoveryCode(plain);
+  if (!normalized) return { ok: false };
+  const rows = await queryAll(
+    env,
+    'SELECT id, code_hash FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL',
+    [userId]
+  );
+  for (const row of rows) {
+    const ok = await verifyPassword(normalized, row.code_hash);
+    if (ok) {
+      const updateResult = await execRun(
+        env,
+        "UPDATE user_recovery_codes SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL",
+        [row.id]
+      );
+      if (Number(updateResult?.meta?.changes || 0) > 0) {
+        return { ok: true, id: row.id };
+      }
+      return { ok: false };
+    }
+  }
+  return { ok: false };
+}
+
+async function verifyPasskeyAssertionForUser(env, request, userId, assertion, challengeToken) {
+  if (!assertion || typeof assertion !== 'object') return { ok: false, message: 'Invalid passkey response.' };
+  const credentialId = String(assertion.id || assertion.rawId || '');
+  if (!credentialId) return { ok: false, message: 'Invalid passkey response.' };
+
+  const challengePayload = await verifyRowoJwt(env, challengeToken, 'webauthn-auth-challenge');
+  if (!challengePayload || challengePayload.uid !== userId) {
+    return { ok: false, message: 'Passkey challenge is invalid or expired.' };
+  }
+
+  const row = await queryFirst(
+    env,
+    `SELECT id, credential_id_b64url, public_key_b64url, counter, transports
+       FROM user_passkey_credentials WHERE user_id = ? AND credential_id_b64url = ?`,
+    [userId, credentialId]
+  );
+  if (!row) return { ok: false, message: 'Unknown passkey.' };
+
+  let rpInfo;
+  try {
+    rpInfo = getRpInfo(request, env);
+  } catch (error) {
+    return { ok: false, message: String(error?.message || 'Bad origin.') };
+  }
+
+  let verification;
+  try {
+    verification = await verifyAuthenticationResponse({
+      response: assertion,
+      expectedChallenge: String(challengePayload.challenge),
+      expectedOrigin: rpInfo.origin,
+      expectedRPID: rpInfo.rpID,
+      credential: {
+        id: row.credential_id_b64url,
+        publicKey: base64UrlBytes(row.public_key_b64url),
+        counter: Number(row.counter) || 0,
+        transports: row.transports ? safeJsonArray(row.transports) : undefined,
+      },
+      requireUserVerification: false,
+    });
+  } catch (error) {
+    return { ok: false, message: 'Passkey verification failed.' };
+  }
+
+  if (!verification.verified || !verification.authenticationInfo) {
+    return { ok: false, message: 'Passkey verification failed.' };
+  }
+  const newCounter = Number(verification.authenticationInfo.newCounter || 0);
+  const storedCounter = Number(row.counter) || 0;
+  if (newCounter < storedCounter) {
+    return { ok: false, message: 'Passkey counter regression detected.' };
+  }
+  await execRun(
+    env,
+    `UPDATE user_passkey_credentials
+       SET counter = ?, last_used_at = datetime('now')
+     WHERE id = ?`,
+    [newCounter, row.id]
+  );
+  return { ok: true, passkeyId: row.id };
+}
+
+function base64UrlBytes(b64url) {
+  let b64 = String(b64url).replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64.length % 4;
+  if (pad) b64 += '===='.slice(0, 4 - pad);
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function safeJsonArray(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Returns { ok: true, factor } on success, or
+// { ok: false, status, message, two_factor_required?, available_methods?, retry_after_seconds? }.
+// If the user has no 2FA enabled, returns { ok: true, factor: 'none' } so callers
+// can use a single insertion point.
+async function verifyAnyTwoFactor(env, request, user, body) {
+  const summary = await getTwoFactorSummary(env, user.id);
+  const enabled = summary.totp_enabled || summary.passkeys.length > 0;
+  if (!enabled) return { ok: true, factor: 'none' };
+
+  const methods = listTwoFactorMethods(summary);
+
+  const ip = getClientIp(request);
+  const minuteKey = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  for (const bucket of [`2fa:user:${user.id}:${minuteKey}`, `2fa:ip:${ip}:${minuteKey}`]) {
+    const q = await consumeTwoFactorRateLimit(env, bucket);
+    if (!q.allowed) {
+      return {
+        ok: false,
+        status: 429,
+        message: 'Too many 2FA attempts. Please try again in a minute.',
+        retry_after_seconds: q.retryAfterSeconds,
+        available_methods: methods,
+      };
+    }
+  }
+
+  if (typeof body.totp_code === 'string' && body.totp_code.length > 0) {
+    if (!summary.totp_enabled) {
+      return { ok: false, status: 401, message: 'TOTP is not enabled.', available_methods: methods };
+    }
+    const row = await queryFirst(
+      env,
+      'SELECT user_id, secret_ciphertext, last_used_counter FROM user_totp_credentials WHERE user_id = ? AND confirmed_at IS NOT NULL',
+      [user.id]
+    );
+    if (!row) {
+      return { ok: false, status: 401, message: 'TOTP is not enabled.', available_methods: methods };
+    }
+    let secretBytes;
+    try {
+      secretBytes = await aesGcmDecrypt(env, row.secret_ciphertext);
+    } catch (error) {
+      logServerError('totp_decrypt', error, { userId: user.id });
+      return { ok: false, status: 500, message: 'TOTP verification unavailable.', available_methods: methods };
+    }
+    const result = await verifyTotpCode(secretBytes, body.totp_code, row.last_used_counter);
+    if (!result.ok) {
+      return { ok: false, status: 401, message: 'Invalid TOTP code.', available_methods: methods };
+    }
+    const updateResult = await execRun(
+      env,
+      `UPDATE user_totp_credentials
+         SET last_used_counter = ?
+       WHERE user_id = ? AND (last_used_counter IS NULL OR last_used_counter < ?)`,
+      [result.counter, user.id, result.counter]
+    );
+    if (Number(updateResult?.meta?.changes || 0) === 0) {
+      return { ok: false, status: 401, message: 'TOTP code already used.', available_methods: methods };
+    }
+    return { ok: true, factor: 'totp' };
+  }
+
+  if (body.passkey_assertion && typeof body.passkey_assertion === 'object') {
+    if (summary.passkeys.length === 0) {
+      return { ok: false, status: 401, message: 'No passkey is registered.', available_methods: methods };
+    }
+    const result = await verifyPasskeyAssertionForUser(
+      env, request, user.id, body.passkey_assertion, body.passkey_challenge_token
+    );
+    if (!result.ok) {
+      return { ok: false, status: 401, message: result.message || 'Passkey verification failed.', available_methods: methods };
+    }
+    return { ok: true, factor: 'passkey' };
+  }
+
+  if (typeof body.recovery_code === 'string' && body.recovery_code.length > 0) {
+    if (summary.recovery_codes_remaining === 0) {
+      return { ok: false, status: 401, message: 'No recovery codes remaining.', available_methods: methods };
+    }
+    const result = await consumeRecoveryCode(env, user.id, body.recovery_code);
+    if (!result.ok) {
+      return { ok: false, status: 401, message: 'Invalid recovery code.', available_methods: methods };
+    }
+    return { ok: true, factor: 'recovery' };
+  }
+
+  return {
+    ok: false,
+    status: 401,
+    message: 'Two-factor authentication is required for this action.',
+    two_factor_required: true,
+    available_methods: methods,
+  };
+}
+
+function twoFactorFailureResponse(tf) {
+  return jsonResponse(
+    {
+      success: false,
+      message: tf.message,
+      two_factor_required: tf.two_factor_required || false,
+      available_methods: tf.available_methods || [],
+      retry_after_seconds: tf.retry_after_seconds,
+    },
+    tf.status || 401
+  );
 }
 
 function formatAmzDate(date) {
@@ -2451,9 +2987,22 @@ async function handleRequest(request, env, ctx) {
         ctx.waitUntil(notifyAdminsOfManualVerification(env, wechat_id, reasonText));
       }
 
+      // Issue a bind token immediately so the user can link this wechat_id to
+      // their ROwO account before admin approval. The accounts row exists
+      // (verified_status=0, manual_status='pending'), and /api/user/bind-wechat
+      // does not gate on verified_status — it only requires the row to exist
+      // and the wechat_id to be unclaimed.
+      const bind = await issueBindToken(env, wechat_id, 'Manual');
+      const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
+
       return jsonResponse({
         success: true,
         message: 'Manual Verification application submitted and is pending approval.',
+        wechat_id,
+        bind_token: bind.token,
+        bind_token_expires_at: bind.expiresAt,
+        already_linked_to_rowo: alreadyLinkedToRowo,
+        pending: true,
       });
     }
 
@@ -2570,6 +3119,60 @@ async function handleRequest(request, env, ctx) {
         return jsonResponse({ success: false, message: 'Invalid username or password.' }, 401);
       }
 
+      // Reject sign-in when the user's bound WeChat ID has been blacklisted.
+      // Returning the blacklist payload lets the login form show a useful
+      // message instead of a generic 401.
+      const blockedResponse = await buildAccountBlockedResponse(env, user);
+      if (blockedResponse) return blockedResponse;
+
+      const tfSummary = await getTwoFactorSummary(env, user.id);
+      if (tfSummary.totp_enabled || tfSummary.passkeys.length > 0) {
+        const methods = listTwoFactorMethods(tfSummary);
+        const now = Math.floor(Date.now() / 1000);
+        const challengeToken = await signRowoJwt(env, {
+          iss: 'rowo-auth',
+          sub: 'login-2fa',
+          uid: user.id,
+          iat: now,
+          exp: now + TWO_FACTOR_CHALLENGE_TTL_SECONDS,
+          jti: randomHex(16),
+        });
+        let webauthnOptions = null;
+        let passkeyChallengeToken = null;
+        if (tfSummary.passkeys.length > 0) {
+          try {
+            const rpInfo = getRpInfo(request, env);
+            const passkeys = await queryAll(
+              env,
+              'SELECT credential_id_b64url, transports FROM user_passkey_credentials WHERE user_id = ?',
+              [user.id]
+            );
+            const options = await generateAuthenticationOptions({
+              rpID: rpInfo.rpID,
+              allowCredentials: passkeys.map((r) => ({
+                id: r.credential_id_b64url,
+                transports: r.transports ? safeJsonArray(r.transports) : undefined,
+              })),
+              userVerification: 'preferred',
+            });
+            passkeyChallengeToken = await issueWebauthnChallengeJwt(
+              env, user.id, 'webauthn-auth-challenge', options.challenge
+            );
+            webauthnOptions = options;
+          } catch (error) {
+            logServerError('login_webauthn_options', error, { userId: user.id });
+          }
+        }
+        return jsonResponse({
+          success: true,
+          two_factor_required: true,
+          challenge_token: challengeToken,
+          methods,
+          webauthn_options: webauthnOptions,
+          passkey_challenge_token: passkeyChallengeToken,
+        });
+      }
+
       await execRun(env, "UPDATE user_accounts SET last_login_at = datetime('now') WHERE id = ?", [user.id]);
       const token = await issueUserSessionToken(env, user.id, user.username_display);
       const fresh = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [user.id]);
@@ -2612,10 +3215,12 @@ async function handleRequest(request, env, ctx) {
           verification = { wechat_id: user.wechat_id, missing: true };
         }
       }
+      const two_factor = await getTwoFactorSummary(env, user.id);
       return jsonResponse({
         success: true,
         user: publicUserShape(user),
         verification,
+        two_factor,
       });
     }
 
@@ -2733,6 +3338,9 @@ async function handleRequest(request, env, ctx) {
         }, 400);
       }
 
+      const tf = await verifyAnyTwoFactor(env, request, auth.user, body);
+      if (!tf.ok) return twoFactorFailureResponse(tf);
+
       const conflictingRowoAccount = await queryFirst(
         env,
         'SELECT id FROM user_accounts WHERE wechat_id = ? AND id != ?',
@@ -2838,6 +3446,8 @@ async function handleRequest(request, env, ctx) {
           message: 'New password must differ from current password.',
         }, 400);
       }
+      const tf = await verifyAnyTwoFactor(env, request, auth.user, body);
+      if (!tf.ok) return twoFactorFailureResponse(tf);
       const newHash = await hashPassword(next);
       await execRun(
         env,
@@ -2849,6 +3459,430 @@ async function handleRequest(request, env, ctx) {
         [newHash, auth.user.id]
       );
       return jsonResponse({ success: true, message: 'Password changed.' });
+    }
+
+    // ------------------------------------------------------------------
+    // Two-Factor Authentication endpoints.
+    // ------------------------------------------------------------------
+
+    if (method === 'POST' && pathname === '/api/user/2fa/totp/begin') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const existing = await queryFirst(
+        env,
+        'SELECT user_id FROM user_totp_credentials WHERE user_id = ? AND confirmed_at IS NOT NULL',
+        [auth.user.id]
+      );
+      if (existing) {
+        return jsonResponse({ success: false, message: 'TOTP is already enabled.' }, 409);
+      }
+      const secretBytes = generateTotpSecret();
+      const { uri, secret_base32 } = buildOtpauthUri(secretBytes, auth.user.username_display);
+      const secretCiphertext = await aesGcmEncrypt(env, secretBytes);
+      const now = Math.floor(Date.now() / 1000);
+      const setupToken = await signRowoJwt(env, {
+        iss: 'rowo-auth',
+        sub: 'totp-setup',
+        uid: auth.user.id,
+        secret_ciphertext: secretCiphertext,
+        iat: now,
+        exp: now + TOTP_SETUP_TTL_SECONDS,
+        jti: randomHex(16),
+      });
+      return jsonResponse({
+        success: true,
+        otpauth_uri: uri,
+        secret_base32,
+        setup_token: setupToken,
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/2fa/totp/confirm') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const setupToken = body.setup_token != null ? String(body.setup_token) : '';
+      const code = body.totp_code != null ? String(body.totp_code).trim() : '';
+      if (!setupToken || !code) {
+        return jsonResponse({ success: false, message: 'setup_token and totp_code are required.' }, 400);
+      }
+      const payload = await verifyRowoJwt(env, setupToken, 'totp-setup');
+      if (!payload || payload.uid !== auth.user.id) {
+        return jsonResponse({ success: false, message: 'Setup token is invalid or expired.' }, 401);
+      }
+      let secretBytes;
+      try {
+        secretBytes = await aesGcmDecrypt(env, payload.secret_ciphertext);
+      } catch (error) {
+        return genericError('totp_confirm_decrypt', error, 500, 'Setup token is malformed.');
+      }
+      const result = await verifyTotpCode(secretBytes, code, null);
+      if (!result.ok) {
+        return jsonResponse({ success: false, message: 'TOTP code is incorrect.' }, 401);
+      }
+      const existing = await queryFirst(
+        env,
+        'SELECT user_id FROM user_totp_credentials WHERE user_id = ?',
+        [auth.user.id]
+      );
+      if (existing) {
+        await execRun(
+          env,
+          `UPDATE user_totp_credentials
+             SET secret_ciphertext = ?, last_used_counter = ?, confirmed_at = datetime('now')
+           WHERE user_id = ?`,
+          [payload.secret_ciphertext, result.counter, auth.user.id]
+        );
+      } else {
+        await execRun(
+          env,
+          `INSERT INTO user_totp_credentials
+             (user_id, secret_ciphertext, last_used_counter, created_at, confirmed_at)
+           VALUES (?, ?, ?, datetime('now'), datetime('now'))`,
+          [auth.user.id, payload.secret_ciphertext, result.counter]
+        );
+      }
+      const summaryBefore = await getTwoFactorSummary(env, auth.user.id);
+      let recoveryCodes = null;
+      if (summaryBefore.recovery_codes_total === 0) {
+        recoveryCodes = await issueRecoveryCodesForUser(env, auth.user.id);
+      }
+      const summary = await getTwoFactorSummary(env, auth.user.id);
+      return jsonResponse({
+        success: true,
+        two_factor: summary,
+        recovery_codes: recoveryCodes,
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/2fa/totp/disable') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const currentPassword = String(body.current_password == null ? '' : body.current_password);
+      if (!currentPassword) {
+        return jsonResponse({ success: false, message: 'current_password is required.' }, 400);
+      }
+      const passwordOk = await verifyPassword(currentPassword, auth.user.password_hash);
+      if (!passwordOk) {
+        return jsonResponse({ success: false, message: 'Current password is incorrect.' }, 401);
+      }
+      const tf = await verifyAnyTwoFactor(env, request, auth.user, body);
+      if (!tf.ok) return twoFactorFailureResponse(tf);
+      await execRun(env, 'DELETE FROM user_totp_credentials WHERE user_id = ?', [auth.user.id]);
+      const summary = await getTwoFactorSummary(env, auth.user.id);
+      return jsonResponse({ success: true, two_factor: summary });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/2fa/passkey/register/begin') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      let rpInfo;
+      try {
+        rpInfo = getRpInfo(request, env);
+      } catch (error) {
+        return jsonResponse({ success: false, message: String(error?.message || 'Bad origin.') }, 400);
+      }
+      const existing = await queryAll(
+        env,
+        'SELECT credential_id_b64url, transports FROM user_passkey_credentials WHERE user_id = ?',
+        [auth.user.id]
+      );
+      const options = await generateRegistrationOptions({
+        rpID: rpInfo.rpID,
+        rpName: rpInfo.rpName,
+        userID: new TextEncoder().encode(auth.user.id),
+        userName: auth.user.username_display,
+        attestationType: 'none',
+        excludeCredentials: existing.map((r) => ({
+          id: r.credential_id_b64url,
+          transports: r.transports ? safeJsonArray(r.transports) : undefined,
+        })),
+        authenticatorSelection: {
+          residentKey: 'preferred',
+          userVerification: 'preferred',
+        },
+      });
+      const challengeToken = await issueWebauthnChallengeJwt(
+        env, auth.user.id, 'webauthn-reg-challenge', options.challenge
+      );
+      return jsonResponse({ success: true, options, challenge_token: challengeToken });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/2fa/passkey/register/finish') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const challengeToken = body.challenge_token != null ? String(body.challenge_token) : '';
+      const attestation = body.attestation_response;
+      const nicknameInput = body.nickname != null ? String(body.nickname).trim() : '';
+      if (!challengeToken || !attestation) {
+        return jsonResponse({ success: false, message: 'challenge_token and attestation_response are required.' }, 400);
+      }
+      if (!nicknameInput) {
+        return jsonResponse({ success: false, message: 'nickname is required.' }, 400);
+      }
+      if (nicknameInput.length > 64) {
+        return jsonResponse({ success: false, message: 'nickname must be at most 64 characters.' }, 400);
+      }
+      const payload = await verifyRowoJwt(env, challengeToken, 'webauthn-reg-challenge');
+      if (!payload || payload.uid !== auth.user.id) {
+        return jsonResponse({ success: false, message: 'Challenge is invalid or expired.' }, 401);
+      }
+      let rpInfo;
+      try {
+        rpInfo = getRpInfo(request, env);
+      } catch (error) {
+        return jsonResponse({ success: false, message: String(error?.message || 'Bad origin.') }, 400);
+      }
+      let verification;
+      try {
+        verification = await verifyRegistrationResponse({
+          response: attestation,
+          expectedChallenge: String(payload.challenge),
+          expectedOrigin: rpInfo.origin,
+          expectedRPID: rpInfo.rpID,
+          requireUserVerification: false,
+        });
+      } catch (error) {
+        return jsonResponse({ success: false, message: 'Passkey registration verification failed.' }, 400);
+      }
+      if (!verification.verified || !verification.registrationInfo) {
+        return jsonResponse({ success: false, message: 'Passkey registration verification failed.' }, 400);
+      }
+      const info = verification.registrationInfo;
+      const credential = info.credential || info; // shape varies across versions
+      const credentialIdB64 = credential.id;
+      const publicKeyBytes = credential.publicKey;
+      const counter = Number(credential.counter || 0);
+      const transports = Array.isArray(attestation?.response?.transports)
+        ? attestation.response.transports
+        : null;
+      const deviceType = info.credentialDeviceType || null;
+      const backedUp = info.credentialBackedUp ? 1 : 0;
+      const aaguid = info.aaguid || null;
+
+      const conflict = await queryFirst(
+        env,
+        'SELECT id FROM user_passkey_credentials WHERE credential_id_b64url = ?',
+        [credentialIdB64]
+      );
+      if (conflict) {
+        return jsonResponse({ success: false, message: 'This passkey is already registered.' }, 409);
+      }
+
+      const id = randomHex(16);
+      await execRun(
+        env,
+        `INSERT INTO user_passkey_credentials
+           (id, user_id, credential_id_b64url, public_key_b64url, counter,
+            transports, device_type, backed_up, aaguid, nickname, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+        [
+          id,
+          auth.user.id,
+          credentialIdB64,
+          bytesToBase64Url(publicKeyBytes),
+          counter,
+          transports ? JSON.stringify(transports) : null,
+          deviceType,
+          backedUp,
+          aaguid,
+          nicknameInput,
+        ]
+      );
+
+      const summaryBefore = await getTwoFactorSummary(env, auth.user.id);
+      let recoveryCodes = null;
+      if (summaryBefore.recovery_codes_total === 0) {
+        recoveryCodes = await issueRecoveryCodesForUser(env, auth.user.id);
+      }
+      const summary = await getTwoFactorSummary(env, auth.user.id);
+      const passkey = summary.passkeys.find((p) => p.id === id) || null;
+      return jsonResponse({
+        success: true,
+        passkey,
+        two_factor: summary,
+        recovery_codes: recoveryCodes,
+      });
+    }
+
+    if (method === 'GET' && pathname === '/api/user/2fa/passkeys') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const summary = await getTwoFactorSummary(env, auth.user.id);
+      return jsonResponse({ success: true, passkeys: summary.passkeys });
+    }
+
+    const passkeyByIdMatch = pathname.match(/^\/api\/user\/2fa\/passkeys\/([^/]+)$/);
+    if (passkeyByIdMatch && (method === 'PATCH' || method === 'DELETE')) {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const passkeyId = decodeURIComponent(passkeyByIdMatch[1]);
+      const row = await queryFirst(
+        env,
+        'SELECT id FROM user_passkey_credentials WHERE id = ? AND user_id = ?',
+        [passkeyId, auth.user.id]
+      );
+      if (!row) {
+        return jsonResponse({ success: false, message: 'Passkey not found.' }, 404);
+      }
+      const body = await parseJson(request);
+      if (method === 'PATCH') {
+        const nickname = body.nickname != null ? String(body.nickname).trim() : '';
+        if (!nickname) {
+          return jsonResponse({ success: false, message: 'nickname is required.' }, 400);
+        }
+        if (nickname.length > 64) {
+          return jsonResponse({ success: false, message: 'nickname must be at most 64 characters.' }, 400);
+        }
+        await execRun(
+          env,
+          'UPDATE user_passkey_credentials SET nickname = ? WHERE id = ? AND user_id = ?',
+          [nickname, passkeyId, auth.user.id]
+        );
+        const summary = await getTwoFactorSummary(env, auth.user.id);
+        return jsonResponse({ success: true, two_factor: summary });
+      }
+      // DELETE
+      const currentPassword = String(body.current_password == null ? '' : body.current_password);
+      if (!currentPassword) {
+        return jsonResponse({ success: false, message: 'current_password is required.' }, 400);
+      }
+      const passwordOk = await verifyPassword(currentPassword, auth.user.password_hash);
+      if (!passwordOk) {
+        return jsonResponse({ success: false, message: 'Current password is incorrect.' }, 401);
+      }
+      const tf = await verifyAnyTwoFactor(env, request, auth.user, body);
+      if (!tf.ok) return twoFactorFailureResponse(tf);
+      await execRun(
+        env,
+        'DELETE FROM user_passkey_credentials WHERE id = ? AND user_id = ?',
+        [passkeyId, auth.user.id]
+      );
+      const summary = await getTwoFactorSummary(env, auth.user.id);
+      return jsonResponse({ success: true, two_factor: summary });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/2fa/passkey/challenge') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const passkeys = await queryAll(
+        env,
+        'SELECT credential_id_b64url, transports FROM user_passkey_credentials WHERE user_id = ?',
+        [auth.user.id]
+      );
+      if (passkeys.length === 0) {
+        return jsonResponse({ success: false, message: 'No passkeys registered.' }, 404);
+      }
+      let rpInfo;
+      try {
+        rpInfo = getRpInfo(request, env);
+      } catch (error) {
+        return jsonResponse({ success: false, message: String(error?.message || 'Bad origin.') }, 400);
+      }
+      const options = await generateAuthenticationOptions({
+        rpID: rpInfo.rpID,
+        allowCredentials: passkeys.map((r) => ({
+          id: r.credential_id_b64url,
+          transports: r.transports ? safeJsonArray(r.transports) : undefined,
+        })),
+        userVerification: 'preferred',
+      });
+      const challengeToken = await issueWebauthnChallengeJwt(
+        env, auth.user.id, 'webauthn-auth-challenge', options.challenge
+      );
+      return jsonResponse({ success: true, options, challenge_token: challengeToken });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/2fa/recovery-codes/regenerate') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const currentPassword = String(body.current_password == null ? '' : body.current_password);
+      if (!currentPassword) {
+        return jsonResponse({ success: false, message: 'current_password is required.' }, 400);
+      }
+      const passwordOk = await verifyPassword(currentPassword, auth.user.password_hash);
+      if (!passwordOk) {
+        return jsonResponse({ success: false, message: 'Current password is incorrect.' }, 401);
+      }
+      const tf = await verifyAnyTwoFactor(env, request, auth.user, body);
+      if (!tf.ok) return twoFactorFailureResponse(tf);
+      const codes = await issueRecoveryCodesForUser(env, auth.user.id);
+      const summary = await getTwoFactorSummary(env, auth.user.id);
+      return jsonResponse({
+        success: true,
+        recovery_codes: codes,
+        batch_id: summary.recovery_codes_batch_id,
+        generated_at: summary.recovery_codes_generated_at,
+      });
+    }
+
+    if (method === 'GET' && pathname === '/api/user/2fa/recovery-codes') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const summary = await getTwoFactorSummary(env, auth.user.id);
+      return jsonResponse({
+        success: true,
+        total: summary.recovery_codes_total,
+        remaining: summary.recovery_codes_remaining,
+        batch_id: summary.recovery_codes_batch_id,
+        generated_at: summary.recovery_codes_generated_at,
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/login/2fa') {
+      const body = await parseJson(request);
+      const challengeToken = body.challenge_token != null ? String(body.challenge_token) : '';
+      if (!challengeToken) {
+        return jsonResponse({ success: false, message: 'challenge_token is required.' }, 400);
+      }
+      const payload = await verifyRowoJwt(env, challengeToken, 'login-2fa');
+      if (!payload || !payload.uid) {
+        return jsonResponse({ success: false, message: 'Challenge is invalid or expired.' }, 401);
+      }
+      const user = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [payload.uid]);
+      if (!user) {
+        return jsonResponse({ success: false, message: 'Account no longer exists.' }, 401);
+      }
+      const blockedResponse = await buildAccountBlockedResponse(env, user);
+      if (blockedResponse) return blockedResponse;
+
+      const tf = await verifyAnyTwoFactor(env, request, user, body);
+      if (!tf.ok) return twoFactorFailureResponse(tf);
+      if (tf.factor === 'none') {
+        return jsonResponse({ success: false, message: 'Two-factor authentication is no longer enabled for this account.' }, 409);
+      }
+
+      await execRun(env, "UPDATE user_accounts SET last_login_at = datetime('now') WHERE id = ?", [user.id]);
+      const sessionToken = await issueUserSessionToken(env, user.id, user.username_display);
+      const fresh = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [user.id]);
+      return jsonResponse({
+        success: true,
+        message: 'Signed in.',
+        token: sessionToken,
+        user: publicUserShape(fresh),
+      });
+    }
+
+    const adminResetTfaMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/reset-2fa$/);
+    if (method === 'POST' && adminResetTfaMatch) {
+      const auth = await requireRole(request, env, 'admin');
+      if (auth.response) return auth.response;
+      const targetId = decodeURIComponent(adminResetTfaMatch[1]);
+      const target = await queryFirst(
+        env,
+        'SELECT id FROM user_accounts WHERE id = ?',
+        [targetId]
+      );
+      if (!target) {
+        return jsonResponse({ success: false, message: 'User not found.' }, 404);
+      }
+      await execRun(env, 'DELETE FROM user_totp_credentials WHERE user_id = ?', [targetId]);
+      await execRun(env, 'DELETE FROM user_passkey_credentials WHERE user_id = ?', [targetId]);
+      await execRun(env, 'DELETE FROM user_recovery_codes WHERE user_id = ?', [targetId]);
+      return jsonResponse({ success: true, message: 'Two-factor methods cleared.' });
     }
 
     if (method === 'GET' && pathname === '/api/admin/stats') {
@@ -3834,6 +4868,8 @@ async function handleRequest(request, env, ctx) {
           granted_scopes: [],
         });
       }
+      const tf = await verifyAnyTwoFactor(env, request, auth.user, body);
+      if (!tf.ok) return twoFactorFailureResponse(tf);
       const code = randomHex(32);
       const codeHash = await sha256Hex(code);
       const expiresAt = new Date(Date.now() + OAUTH_CODE_TTL_SECONDS * 1000).toISOString();

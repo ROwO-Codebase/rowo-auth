@@ -20,7 +20,8 @@ import LoginPage from './pages/LoginPage';
 import UserCenterPage from './pages/UserCenterPage';
 import OAuthAuthorizePage from './pages/OAuthAuthorizePage';
 import SsoPage from './pages/SsoPage';
-import { SessionProvider } from './contexts/SessionContext';
+import BlockedAccountPage from './pages/BlockedAccountPage';
+import { SessionProvider, useSession } from './contexts/SessionContext';
 
 function AdfsRedirect() {
   useEffect(() => {
@@ -29,28 +30,41 @@ function AdfsRedirect() {
   return <div className="p-8 text-center text-slate-500">Redirecting to ADFS...</div>;
 }
 
+function AppRoutes() {
+  const { blacklist } = useSession();
+
+  // Blacklist takes over the whole app — the user has a valid session token but
+  // every API call would 403. Showing the routes would just give them broken
+  // pages.
+  if (blacklist) return <BlockedAccountPage />;
+
+  return (
+    <Routes>
+      <Route path="/" element={<LandingPage />} />
+      <Route path="/verify" element={<VerificationPage />} />
+      <Route path="/verify/discord/callback" element={<DiscordCallback />} />
+      <Route path="/verify/github/callback" element={<GitHubCallback />} />
+      <Route path="/verify/adfs/callback" element={<AdfsCallback />} />
+      <Route path="/adfs" element={<AdfsRedirect />} />
+      <Route path="/admin" element={<AdminPanel />} />
+      <Route path="/about" element={<AboutPage />} />
+      <Route path="/privacy" element={<PrivacyPage />} />
+      <Route path="/faq" element={<FAQPage />} />
+      <Route path="/signup" element={<SignupPage />} />
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/center" element={<UserCenterPage />} />
+      <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
+      <Route path="/sso" element={<SsoPage />} />
+    </Routes>
+  );
+}
+
 export default function App() {
   return (
     <SessionProvider>
       <Router>
         <Layout>
-          <Routes>
-            <Route path="/" element={<LandingPage />} />
-            <Route path="/verify" element={<VerificationPage />} />
-            <Route path="/verify/discord/callback" element={<DiscordCallback />} />
-            <Route path="/verify/github/callback" element={<GitHubCallback />} />
-            <Route path="/verify/adfs/callback" element={<AdfsCallback />} />
-            <Route path="/adfs" element={<AdfsRedirect />} />
-            <Route path="/admin" element={<AdminPanel />} />
-            <Route path="/about" element={<AboutPage />} />
-            <Route path="/privacy" element={<PrivacyPage />} />
-            <Route path="/faq" element={<FAQPage />} />
-            <Route path="/signup" element={<SignupPage />} />
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/center" element={<UserCenterPage />} />
-            <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
-            <Route path="/sso" element={<SsoPage />} />
-          </Routes>
+          <AppRoutes />
         </Layout>
       </Router>
     </SessionProvider>
