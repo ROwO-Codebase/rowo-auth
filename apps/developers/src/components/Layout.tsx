@@ -127,7 +127,14 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </nav>
         </div>
       </header>
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main
+        className={clsx(
+          'flex-1 w-full mx-auto px-4 sm:px-6 lg:px-8 py-8',
+          location.pathname.startsWith('/docs')
+            ? 'max-w-7xl 2xl:max-w-[88rem]'
+            : 'max-w-6xl'
+        )}
+      >
         {children}
       </main>
       <footer className="bg-white border-t border-slate-200 py-6 mt-auto">
