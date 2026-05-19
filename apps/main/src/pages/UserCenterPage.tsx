@@ -6,7 +6,7 @@ import ReactMarkdown from 'react-markdown';
 import {
   User, ShieldCheck, KeyRound, RefreshCw, LogOut, Link2, Loader2, AlertCircle, X,
   AlertTriangle, CheckCircle2, Clock, XCircle, Globe, ShieldAlert, Pencil, Info,
-  FileText,
+  FileText, Shield,
 } from 'lucide-react';
 import { useSession } from '../contexts/SessionContext';
 import { authHeaders } from '@rowo/shared/session';
@@ -145,42 +145,21 @@ export default function UserCenterPage() {
                 <div className="font-mono text-sm break-all">{user.wechat_id}</div>
               </div>
 
-              {verification ? (
-                verification.missing ? (
-                  <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-sm text-amber-800 flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                    <span>The verification record for this WeChat ID no longer exists. Contact an admin.</span>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-2 gap-3 text-sm">
-                    <div>
-                      <div className="text-xs uppercase tracking-wide text-slate-400">Status</div>
-                      <div className={verification.verified_status ? 'text-emerald-700 font-medium' : 'text-slate-500'}>
-                        {verification.verified_status ? 'Verified' : 'Pending / not verified'}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-xs uppercase tracking-wide text-slate-400">Method</div>
-                      <div>{verification.verification_method || '—'}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs uppercase tracking-wide text-slate-400">Verified at</div>
-                      <div>{formatDate(verification.verification_time)}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs uppercase tracking-wide text-slate-400">Re-verified at</div>
-                      <div>{formatDate(verification.reverified_at)}</div>
-                    </div>
-                  </div>
-                )
-              ) : null}
+              {verification?.missing && (
+                <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-sm text-amber-800 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  <span>The verification record for this WeChat ID no longer exists. Contact an admin.</span>
+                </div>
+              )}
 
-              <div className="text-xs text-slate-500 pt-2 border-t border-slate-100 mt-3">
-                Last WeChat change: {formatDate(user.last_wechat_change_at)}
-                {nextEligibleDate && !canChangeWechat && (
-                  <span> · Next change eligible {format(nextEligibleDate, 'yyyy-MM-dd')}</span>
-                )}
-              </div>
+              {lastChangeAt && (
+                <div className="text-xs text-slate-500 pt-2 border-t border-slate-100 mt-3">
+                  Last WeChat change: {formatDate(user.last_wechat_change_at)}
+                  {nextEligibleDate && !canChangeWechat && (
+                    <span> · Next change eligible {format(nextEligibleDate, 'yyyy-MM-dd')}</span>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 text-sm text-amber-800">
@@ -553,7 +532,27 @@ function PublicProfileBody({ account, notes }: { account: PublicAccount; notes: 
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">{statusBadge}</div>
+      <div className="flex items-center gap-2 flex-wrap">
+        {statusBadge}
+        {account.hash_version === 'hmac-sha256' && (
+          <span
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800"
+            title="Your account data is hashed with HMAC-SHA-256."
+          >
+            <Shield className="w-3.5 h-3.5" />
+            HMAC-SHA-256
+          </span>
+        )}
+        {account.hash_version === 'sha256' && (
+          <span
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800"
+            title="Re-verify your account to upgrade to HMAC-SHA-256."
+          >
+            <AlertTriangle className="w-3.5 h-3.5" />
+            SHA-256
+          </span>
+        )}
+      </div>
 
       {isManualPending && (
         <div className="border-l-4 border-amber-400 bg-amber-50 rounded-r-xl p-3 text-sm text-amber-800 flex items-start gap-2">
@@ -608,7 +607,7 @@ function PublicProfileBody({ account, notes }: { account: PublicAccount; notes: 
         <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Public notes</div>
         {notes.length === 0 ? (
           <div className="text-xs text-slate-500 italic">
-            No public notes attached. Admins can add notes that show up on the public verification page.
+            No public notes attached.
           </div>
         ) : (
           <div className="space-y-2">
