@@ -1,10 +1,47 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
-import { User, ShieldCheck, KeyRound, RefreshCw, LogOut, Link2, Loader2, AlertCircle, X, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import {
+  User, ShieldCheck, KeyRound, RefreshCw, LogOut, Link2, Loader2, AlertCircle, X,
+  AlertTriangle, CheckCircle2, Clock, XCircle, Globe, ShieldAlert, Pencil, Info,
+  FileText,
+} from 'lucide-react';
 import { useSession } from '../contexts/SessionContext';
 import { authHeaders } from '@rowo/shared/session';
+
+interface PublicInfoNote {
+  id: number;
+  color: string;
+  icon: string;
+  title: string;
+  body: string;
+  creator: string;
+  created_at: string;
+}
+
+interface PublicAccount {
+  wechat_id: string;
+  verified_status: number;
+  verification_method: string | null;
+  verification_time: string | null;
+  reverified_at: string | null;
+  manual_status?: string | null;
+  manual_reason?: string | null;
+  manual_admin?: string | null;
+  manual_time?: string | null;
+  hash_version: 'hmac-sha256' | 'sha256' | null;
+}
+
+interface PublicProfile {
+  success: boolean;
+  message?: string;
+  blacklisted?: boolean;
+  blacklist?: { wechat_id: string; reason: string };
+  account?: PublicAccount;
+  info?: PublicInfoNote[];
+}
 
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
@@ -23,12 +60,38 @@ export default function UserCenterPage() {
   const navigate = useNavigate();
   const { user, verification, loading, signOut, refresh } = useSession();
   const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [publicProfile, setPublicProfile] = useState<PublicProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  const loadPublicProfile = useCallback(async (wechatId: string) => {
+    setProfileLoading(true);
+    setProfileError(null);
+    try {
+      const res = await fetch(`${__API_ENDPOINT__}/api/verify/${encodeURIComponent(wechatId)}`);
+      const data = (await res.json()) as PublicProfile;
+      setPublicProfile(data);
+    } catch {
+      setProfileError('Could not load your public profile.');
+      setPublicProfile(null);
+    } finally {
+      setProfileLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (!loading && !user) {
       navigate('/login?next=/center', { replace: true });
     }
   }, [loading, user, navigate]);
+
+  useEffect(() => {
+    if (!user?.wechat_id) {
+      setPublicProfile(null);
+      return;
+    }
+    loadPublicProfile(user.wechat_id);
+  }, [user?.wechat_id, loadPublicProfile]);
 
   if (loading || !user) {
     return (
@@ -129,6 +192,16 @@ export default function UserCenterPage() {
             </div>
           )}
         </div>
+
+        {user.wechat_id && (
+          <PublicProfileCard
+            wechatId={user.wechat_id}
+            profile={publicProfile}
+            loading={profileLoading}
+            error={profileError}
+            onRefresh={() => loadPublicProfile(user.wechat_id!)}
+          />
+        )}
 
         <div className="grid sm:grid-cols-2 gap-4">
           {user.wechat_id ? (
@@ -342,5 +415,228 @@ function ChangePasswordModal({ onClose, onSuccess }: { onClose: () => void; onSu
         </form>
       </motion.div>
     </motion.div>
+  );
+}
+
+const INFO_COLOR_CLASSES: Record<string, { wrap: string; icon: string }> = {
+  blue: { wrap: 'bg-blue-50 border-blue-200 text-blue-900', icon: 'text-blue-600' },
+  orange: { wrap: 'bg-orange-50 border-orange-200 text-orange-900', icon: 'text-orange-600' },
+  yellow: { wrap: 'bg-yellow-50 border-yellow-200 text-yellow-900', icon: 'text-yellow-600' },
+  red: { wrap: 'bg-red-50 border-red-200 text-red-900', icon: 'text-red-600' },
+  purple: { wrap: 'bg-purple-50 border-purple-200 text-purple-900', icon: 'text-purple-600' },
+  emerald: { wrap: 'bg-emerald-50 border-emerald-200 text-emerald-900', icon: 'text-emerald-600' },
+  slate: { wrap: 'bg-slate-50 border-slate-200 text-slate-800', icon: 'text-slate-600' },
+};
+
+const INFO_ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
+  warning: AlertTriangle,
+  error: XCircle,
+  checkmark: CheckCircle2,
+  pencil: Pencil,
+  refresh: RefreshCw,
+  info: Info,
+  document: FileText,
+};
+
+function PublicProfileCard({
+  wechatId,
+  profile,
+  loading,
+  error,
+  onRefresh,
+}: {
+  wechatId: string;
+  profile: PublicProfile | null;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 sm:p-8">
+      <div className="flex items-start justify-between mb-1 gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <Globe className="w-5 h-5 text-indigo-600 shrink-0" />
+          <h2 className="text-lg font-semibold text-slate-900">Public profile</h2>
+        </div>
+        <button
+          onClick={onRefresh}
+          disabled={loading}
+          className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors disabled:opacity-40"
+          aria-label="Refresh public profile"
+          title="Refresh"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+      <p className="text-xs text-slate-500 mb-4">
+        What anyone sees when they look up <span className="font-mono">{wechatId}</span> on the
+        public verification page.
+      </p>
+
+      {loading && !profile ? (
+        <div className="flex items-center gap-2 text-sm text-slate-500 py-4">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          Loading public profile…
+        </div>
+      ) : error ? (
+        <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-sm text-red-700 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <span>{error}</span>
+        </div>
+      ) : profile?.blacklisted ? (
+        <div className="border-l-4 border-slate-900 bg-slate-50 rounded-r-xl p-4 flex items-start gap-3">
+          <ShieldAlert className="w-5 h-5 text-slate-900 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <h3 className="text-sm font-bold text-slate-900">Account blacklisted</h3>
+            <p className="text-sm text-slate-700 mt-1">
+              Reason: {profile.blacklist?.reason || 'No reason provided.'}
+            </p>
+          </div>
+        </div>
+      ) : profile?.success && profile.account ? (
+        <PublicProfileBody account={profile.account} notes={profile.info || []} />
+      ) : (
+        <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-sm text-amber-800 flex items-start gap-2">
+          <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <span>
+            No public record found for this WeChat ID yet.
+            {profile?.message ? ` (${profile.message})` : ''}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PublicProfileBody({ account, notes }: { account: PublicAccount; notes: PublicInfoNote[] }) {
+  const status = Number(account.verified_status);
+  const isManualPending = account.verification_method === 'Manual' && account.manual_status === 'pending';
+  const isManualRejected = account.verification_method === 'Manual' && account.manual_status === 'rejected';
+
+  let statusBadge: React.ReactNode;
+  if (status === 1) {
+    statusBadge = (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
+        <CheckCircle2 className="w-3.5 h-3.5" />
+        Verified
+      </span>
+    );
+  } else if (status === 2) {
+    statusBadge = (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
+        <ShieldAlert className="w-3.5 h-3.5" />
+        Revoked
+      </span>
+    );
+  } else if (isManualPending) {
+    statusBadge = (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+        <Clock className="w-3.5 h-3.5" />
+        Pending review
+      </span>
+    );
+  } else if (isManualRejected) {
+    statusBadge = (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
+        <XCircle className="w-3.5 h-3.5" />
+        Rejected
+      </span>
+    );
+  } else {
+    statusBadge = (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-700">
+        <Clock className="w-3.5 h-3.5" />
+        Not verified
+      </span>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">{statusBadge}</div>
+
+      {isManualPending && (
+        <div className="border-l-4 border-amber-400 bg-amber-50 rounded-r-xl p-3 text-sm text-amber-800 flex items-start gap-2">
+          <Clock className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <span>
+            Your manual verification was submitted{' '}
+            {account.verification_time ? `on ${formatDate(account.verification_time)}` : ''} and is
+            awaiting admin review.
+          </span>
+        </div>
+      )}
+
+      {isManualRejected && (
+        <div className="border-l-4 border-red-500 bg-red-50 rounded-r-xl p-3 text-sm text-red-800">
+          <div className="font-semibold">Manual verification rejected</div>
+          {account.manual_reason && (
+            <div className="mt-1 text-xs">Reason: {account.manual_reason}</div>
+          )}
+          {account.manual_admin && account.manual_time && (
+            <div className="mt-1 text-xs opacity-80">
+              by {account.manual_admin} on {formatDate(account.manual_time)}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <div>
+          <div className="text-xs uppercase tracking-wide text-slate-400">Method</div>
+          <div>{account.verification_method || '—'}</div>
+        </div>
+        <div>
+          <div className="text-xs uppercase tracking-wide text-slate-400">Verified at</div>
+          <div>{formatDate(account.verification_time)}</div>
+        </div>
+        {account.reverified_at && (
+          <div className="col-span-2">
+            <div className="text-xs uppercase tracking-wide text-slate-400">Re-verified at</div>
+            <div>{formatDate(account.reverified_at)}</div>
+          </div>
+        )}
+      </div>
+
+      {account.hash_version === 'sha256' && (
+        <div className="border-l-4 border-orange-400 bg-orange-50 rounded-r-xl p-3 text-sm text-orange-800">
+          Your account data is hashed with the legacy SHA-256 algorithm. Re-verify to upgrade to
+          HMAC-SHA-256.
+        </div>
+      )}
+
+      <div>
+        <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Public notes</div>
+        {notes.length === 0 ? (
+          <div className="text-xs text-slate-500 italic">
+            No public notes attached. Admins can add notes that show up on the public verification page.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {notes.map((note) => {
+              const palette = INFO_COLOR_CLASSES[note.color] || INFO_COLOR_CLASSES.slate;
+              const Icon = INFO_ICON_MAP[note.icon] || Info;
+              return (
+                <div
+                  key={note.id}
+                  className={`border-l-4 p-3 rounded-r-lg flex items-start gap-3 ${palette.wrap}`}
+                >
+                  <Icon className={`w-4 h-4 shrink-0 mt-0.5 ${palette.icon}`} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold">{note.title}</div>
+                    <div className="text-sm prose prose-sm max-w-none prose-p:my-1 prose-headings:my-2">
+                      <ReactMarkdown>{note.body}</ReactMarkdown>
+                    </div>
+                    <div className="text-xs opacity-70 mt-1">
+                      by {note.creator}
+                      {note.created_at && ` · ${formatDate(note.created_at)}`}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

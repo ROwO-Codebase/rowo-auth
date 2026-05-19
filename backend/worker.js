@@ -2451,9 +2451,22 @@ async function handleRequest(request, env, ctx) {
         ctx.waitUntil(notifyAdminsOfManualVerification(env, wechat_id, reasonText));
       }
 
+      // Issue a bind token immediately so the user can link this wechat_id to
+      // their ROwO account before admin approval. The accounts row exists
+      // (verified_status=0, manual_status='pending'), and /api/user/bind-wechat
+      // does not gate on verified_status — it only requires the row to exist
+      // and the wechat_id to be unclaimed.
+      const bind = await issueBindToken(env, wechat_id, 'Manual');
+      const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
+
       return jsonResponse({
         success: true,
         message: 'Manual Verification application submitted and is pending approval.',
+        wechat_id,
+        bind_token: bind.token,
+        bind_token_expires_at: bind.expiresAt,
+        already_linked_to_rowo: alreadyLinkedToRowo,
+        pending: true,
       });
     }
 

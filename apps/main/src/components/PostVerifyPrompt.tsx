@@ -11,6 +11,8 @@ interface Props {
   method: string;
   reverified?: boolean;
   alreadyLinkedToRowo?: boolean;
+  /** True when the underlying verification is still under admin review (manual flow). */
+  pending?: boolean;
 }
 
 type Phase =
@@ -22,7 +24,7 @@ type Phase =
   | 'switched'               // switch succeeded
   | 'error';
 
-export default function PostVerifyPrompt({ bindToken, wechatId, method, reverified, alreadyLinkedToRowo }: Props) {
+export default function PostVerifyPrompt({ bindToken, wechatId, method, reverified, alreadyLinkedToRowo, pending }: Props) {
   const navigate = useNavigate();
   const { user, refresh, signOut } = useSession();
   const [phase, setPhase] = useState<Phase>('choose');
@@ -113,12 +115,25 @@ export default function PostVerifyPrompt({ bindToken, wechatId, method, reverifi
       <CardShell>
         <Header
           icon={<CheckCircle2 className="w-7 h-7" />}
-          color="emerald"
-          title={reverified ? 'Re-verification complete' : 'Verification complete'}
+          color={pending ? 'amber' : 'emerald'}
+          title={
+            pending
+              ? 'Submitted — linked to your ROwO account'
+              : reverified ? 'Re-verification complete' : 'Verification complete'
+          }
           subtitle={
             <>
               WeChat ID <span className="font-mono">{wechatId}</span>{' '}
               is linked to <strong>@{user?.username}</strong>.
+              {pending && (
+                <>
+                  <br />
+                  <span className="text-amber-700">
+                    Your manual verification is pending admin review. You&rsquo;ll show as
+                    &ldquo;Pending&rdquo; until an admin approves it.
+                  </span>
+                </>
+              )}
             </>
           }
         />
@@ -317,14 +332,27 @@ export default function PostVerifyPrompt({ bindToken, wechatId, method, reverifi
       <Header
         icon={<Sparkles className="w-7 h-7" />}
         color="indigo"
-        title={reverified ? 'Re-verified — manage in one place?' : 'Verified — manage in one place?'}
+        title={
+          pending
+            ? 'Submitted — link it to a ROwO Account?'
+            : reverified ? 'Re-verified — manage in one place?' : 'Verified — manage in one place?'
+        }
         subtitle={
           <>
             Create a <strong>ROwO Account</strong> to manage your identity, preferences, and
             authorize third-party apps with a single login.
+            {pending && (
+              <>
+                <br />
+                <span className="text-amber-700">
+                  Your manual verification is pending review — you can link it now and it will
+                  flip to &ldquo;Verified&rdquo; automatically once approved.
+                </span>
+              </>
+            )}
             <br />
             <span className="font-mono text-xs text-slate-500 break-all">
-              Verified WeChat ID: {wechatId}
+              {pending ? 'WeChat ID' : 'Verified WeChat ID'}: {wechatId}
             </span>
           </>
         }
