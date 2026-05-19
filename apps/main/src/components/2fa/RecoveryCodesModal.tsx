@@ -51,17 +51,10 @@ export function RecoveryCodesModal({ onClose, onChanged, summary, availableMetho
       }
       setCodes(data.recovery_codes as string[]);
       setStage('view');
-      // Pull a fresh /me to update remaining count.
-      try {
-        const meRes = await fetch(`${__API_ENDPOINT__}/api/user/me`, {
-          headers: { ...authHeaders() },
-        });
-        const meData = await meRes.json();
-        if (meData?.success && meData.two_factor) onChanged(meData.two_factor);
-      } catch {
-        // ignore
-      }
       setBusy(false);
+      // Parent refresh is deferred to onAcknowledge — calling onChanged here
+      // would set loading=true in SessionContext and unmount the page (along
+      // with this modal) while the user is reading the codes.
     } catch {
       setError('Network error.');
       setBusy(false);
@@ -183,7 +176,16 @@ export function RecoveryCodesModal({ onClose, onChanged, summary, availableMetho
       )}
 
       {stage === 'view' && codes && (
-        <RecoveryCodesView codes={codes} onAcknowledge={onClose} />
+        <RecoveryCodesView
+          codes={codes}
+          onAcknowledge={() => {
+            // Defer parent refresh until user has saved codes; refresh flips
+            // loading=true in SessionContext and would otherwise tear down
+            // this modal mid-display.
+            onChanged(summary);
+            onClose();
+          }}
+        />
       )}
     </ModalShell>
   );

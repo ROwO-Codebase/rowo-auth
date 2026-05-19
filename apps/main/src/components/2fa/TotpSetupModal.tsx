@@ -87,11 +87,14 @@ export function TotpSetupModal({ onClose, onChanged }: Props) {
         return;
       }
       setLastSummary(data.two_factor);
-      onChanged(data.two_factor);
       if (data.recovery_codes && data.recovery_codes.length > 0) {
+        // Defer parent refresh to the recovery-code acknowledge step —
+        // refresh flips loading=true in SessionContext and would tear down
+        // this modal before the user can read the codes.
         setRecoveryCodes(data.recovery_codes);
         setStage('recovery');
       } else {
+        onChanged(data.two_factor);
         onClose();
       }
     } catch {

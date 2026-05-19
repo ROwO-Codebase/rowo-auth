@@ -157,20 +157,14 @@ export function TwoFactorCard({ summary, onChanged }: Props) {
           <TotpSetupModal
             key="totp-setup"
             onClose={() => setShowTotpSetup(false)}
-            onChanged={(s) => {
-              onChanged(s);
-              setShowTotpSetup(false);
-            }}
+            onChanged={onChanged}
           />
         )}
         {showTotpDisable && (
           <TotpDisableModal
             key="totp-disable"
             onClose={() => setShowTotpDisable(false)}
-            onChanged={(s) => {
-              onChanged(s);
-              setShowTotpDisable(false);
-            }}
+            onChanged={onChanged}
             availableMethods={methods}
           />
         )}
@@ -178,10 +172,7 @@ export function TwoFactorCard({ summary, onChanged }: Props) {
           <PasskeyAddModal
             key="passkey-add"
             onClose={() => setShowPasskeyAdd(false)}
-            onChanged={(s) => {
-              onChanged(s);
-              setShowPasskeyAdd(false);
-            }}
+            onChanged={onChanged}
           />
         )}
         {deletePasskey && (
@@ -190,10 +181,7 @@ export function TwoFactorCard({ summary, onChanged }: Props) {
             passkey={deletePasskey}
             availableMethods={methods}
             onClose={() => setDeletePasskey(null)}
-            onChanged={(s) => {
-              onChanged(s);
-              setDeletePasskey(null);
-            }}
+            onChanged={onChanged}
           />
         )}
         {showRecovery && (

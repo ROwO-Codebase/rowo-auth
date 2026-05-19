@@ -54,11 +54,14 @@ export function PasskeyAddModal({ onClose, onChanged }: Props) {
         return;
       }
       setLastSummary(finishData.two_factor);
-      onChanged(finishData.two_factor);
       if (finishData.recovery_codes && finishData.recovery_codes.length > 0) {
+        // Defer parent refresh to the recovery-code acknowledge step —
+        // refresh flips loading=true in SessionContext and would tear down
+        // this modal before the user can read the codes.
         setRecoveryCodes(finishData.recovery_codes);
         setStage('recovery');
       } else {
+        onChanged(finishData.two_factor);
         onClose();
       }
     } catch (err) {
