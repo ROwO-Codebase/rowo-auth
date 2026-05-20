@@ -25,6 +25,7 @@ GITHUB_CLIENT_ID = ""
 GITHUB_REDIRECT_URI = "https://rowo.link/verify/github/callback"
 SES_FROM_EMAIL = "verification@rowo.link"
 SES_FROM_NAME = "ROwO Auth"
+WEBAUTHN_ALLOWED_ORIGINS = "https://rowo.link,http://localhost:5173"
 # GITHUB_CLIENT_SECRET, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN,
 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, SENSITIVE_DATA_HASH_SECRET,
 # ADFS_JWT_SECRET, ROWO_AUTH_JWT_SECRET, TWO_FACTOR_ENC_KEY
@@ -56,3 +57,4 @@ GITHUB_CLIENT_ID = ""
 GITHUB_REDIRECT_URI = "https://rowo.link/verify/github/callback"
 SES_FROM_EMAIL = "verification@rowo.link"
 SES_FROM_NAME = "ROwO Auth"
+WEBAUTHN_ALLOWED_ORIGINS = "https://rowo.link"

@@ -706,9 +706,14 @@ async function issueWebauthnChallengeJwt(env, userId, kind, challengeB64url) {
   });
 }
 
+// WebAuthn has its own allowlist (WEBAUTHN_ALLOWED_ORIGINS), separate
+// from CORS_ALLOW_ORIGINS, so passkey registration/auth can be enabled
+// for a subset of allowed CORS origins (e.g. exclude OAuth-only client
+// domains) or extended to extra origins without widening CORS itself.
+// Must be set: empty means no origin can register or use passkeys.
 function getRpInfo(request, env) {
   const origin = request.headers.get('origin') || '';
-  const allowed = String(env.CORS_ALLOW_ORIGINS || '')
+  const allowed = String(env.WEBAUTHN_ALLOWED_ORIGINS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   if (!origin || !allowed.includes(origin)) {
     throw new Error('Origin not allowed for WebAuthn.');
