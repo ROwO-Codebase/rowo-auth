@@ -1,9 +1,10 @@
-name = "rowo-auth"
+name = "rowo-auth-preview"
 main = "worker.js"
 compatibility_date = "2026-04-16"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 placement = { mode = "smart" }
+preview_urls = false
 
 # account_id is provided via the CLOUDFLARE_ACCOUNT_ID env var (read
 # natively by Wrangler). Cloudflare Workers Builds supplies this
