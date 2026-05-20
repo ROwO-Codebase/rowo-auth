@@ -706,9 +706,14 @@ async function issueWebauthnChallengeJwt(env, userId, kind, challengeB64url) {
   });
 }
 
+// WebAuthn has its own allowlist (WEBAUTHN_ALLOWED_ORIGINS), separate
+// from CORS_ALLOW_ORIGINS, so passkey registration/auth can be enabled
+// for a subset of allowed CORS origins (e.g. exclude OAuth-only client
+// domains) or extended to extra origins without widening CORS itself.
+// Must be set: empty means no origin can register or use passkeys.
 function getRpInfo(request, env) {
   const origin = request.headers.get('origin') || '';
-  const allowed = String(env.CORS_ALLOW_ORIGINS || '')
+  const allowed = String(env.WEBAUTHN_ALLOWED_ORIGINS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   if (!origin || !allowed.includes(origin)) {
     throw new Error('Origin not allowed for WebAuthn.');
@@ -3651,16 +3656,18 @@ async function handleRequest(request, env, ctx) {
         return jsonResponse({ success: false, message: 'Passkey registration verification failed.' }, 400);
       }
       const info = verification.registrationInfo;
-      const credential = info.credential || info; // shape varies across versions
-      const credentialIdB64 = credential.id;
-      const publicKeyBytes = credential.publicKey;
-      const counter = Number(credential.counter || 0);
+      const credentialIdB64 = info.credentialID;
+      const publicKeyBytes = info.credentialPublicKey;
+      const counter = Number(info.counter || 0);
       const transports = Array.isArray(attestation?.response?.transports)
         ? attestation.response.transports
         : null;
       const deviceType = info.credentialDeviceType || null;
       const backedUp = info.credentialBackedUp ? 1 : 0;
       const aaguid = info.aaguid || null;
+      if (!credentialIdB64 || !publicKeyBytes) {
+        return jsonResponse({ success: false, message: 'Passkey registration verification failed.' }, 400);
+      }
 
       const conflict = await queryFirst(
         env,

@@ -3,32 +3,34 @@ main = "worker.js"
 compatibility_date = "2026-04-16"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
+placement = { mode = "smart" }
 
-# Set this in CI or locally before deploy:
-# CLOUDFLARE_ACCOUNT_ID=your_account_id
-account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID"
+# account_id is provided via the CLOUDFLARE_ACCOUNT_ID env var (read
+# natively by Wrangler). Set it in CI as a secret, or locally via .env
+# / shell profile before running `wrangler dev` or `wrangler deploy`.
 
 [[d1_databases]]
 binding = "auth_database"
 database_name = "rowo-auth-db"
-database_id = "YOUR_D1_DATABASE_ID"
+database_id = "${D1_DATABASE_ID_PREVIEW}"
 
 [vars]
-ADFS_PROVIDER_ENDPOINT = "https://adfs.example.edu/login"
 ALLOWED_EMAIL_DOMAIN = "uwaterloo.ca"
 AWS_REGION = "us-east-1"
-CORS_ALLOW_ORIGINS = "https://rowo.link,https://developers.rowo.link,http://localhost:5173,http://localhost:5174"
-DISCORD_CLIENT_ID = ""
+CORS_ALLOW_ORIGINS = "https://rowo.link,https://developers.rowo.link,https://preview.rowo.link,https://developers-preview.rowo.link"
 DISCORD_REDIRECT_URI = "https://rowo.link/verify/discord/callback"
 EMAIL_SENDS_PER_MINUTE = "60"
-GITHUB_CLIENT_ID = ""
 GITHUB_REDIRECT_URI = "https://rowo.link/verify/github/callback"
 SES_FROM_EMAIL = "verification@rowo.link"
 SES_FROM_NAME = "ROwO Auth"
-# GITHUB_CLIENT_SECRET, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN,
-# AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, SENSITIVE_DATA_HASH_SECRET,
-# ADFS_JWT_SECRET, ROWO_AUTH_JWT_SECRET, TWO_FACTOR_ENC_KEY
-# must be set as Wrangler secrets (wrangler secret put ...).
+WEBAUTHN_ALLOWED_ORIGINS = "https://rowo.link"
+# The following must be set as Wrangler secrets (wrangler secret put NAME):
+#   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN,
+#   GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+#   SENSITIVE_DATA_HASH_SECRET,
+#   ADFS_PROVIDER_ENDPOINT, ADFS_JWT_SECRET,
+#   ROWO_AUTH_JWT_SECRET, TWO_FACTOR_ENC_KEY
 # ROWO_AUTH_JWT_SECRET: 32+ random bytes (base64). Used to sign ROwO Account
 # session JWTs and bind tokens. Generate with: openssl rand -base64 48
 # TWO_FACTOR_ENC_KEY: exactly 32 random bytes (base64) used as the AES-GCM
@@ -38,21 +40,20 @@ SES_FROM_NAME = "ROwO Auth"
 [env.production]
 name = "rowo-auth"
 compatibility_flags = ["nodejs_compat"]
+placement = { mode = "smart" }
 
 [[env.production.d1_databases]]
 binding = "auth_database"
 database_name = "rowo-auth-db"
-database_id = "YOUR_PRODUCTION_D1_DATABASE_ID"
+database_id = "${D1_DATABASE_ID_PRODUCTION}"
 
 [env.production.vars]
-ADFS_PROVIDER_ENDPOINT = "https://adfs.example.edu/login"
 ALLOWED_EMAIL_DOMAIN = "uwaterloo.ca"
 AWS_REGION = "us-east-1"
-CORS_ALLOW_ORIGINS = "https://rowo.link,https://developers.rowo.link,http://localhost:5173,http://localhost:5174"
-DISCORD_CLIENT_ID = ""
+CORS_ALLOW_ORIGINS = "https://rowo.link,https://developers.rowo.link"
 DISCORD_REDIRECT_URI = "https://rowo.link/verify/discord/callback"
 EMAIL_SENDS_PER_MINUTE = "60"
-GITHUB_CLIENT_ID = ""
 GITHUB_REDIRECT_URI = "https://rowo.link/verify/github/callback"
 SES_FROM_EMAIL = "verification@rowo.link"
 SES_FROM_NAME = "ROwO Auth"
+WEBAUTHN_ALLOWED_ORIGINS = "https://rowo.link"
