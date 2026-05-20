@@ -1,19 +1,22 @@
-name = "rowo-auth"
+name = "rowo-auth-preview"
 main = "worker.js"
 compatibility_date = "2026-04-16"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 placement = { mode = "smart" }
+preview_urls = false
 
 # account_id is provided via the CLOUDFLARE_ACCOUNT_ID env var (read
 # natively by Wrangler). Cloudflare Workers Builds supplies this
 # automatically; locally set it via .env / shell profile.
 #
 # database_id uses ${VAR} placeholders that Wrangler does NOT expand on
-# its own. The deploy command must template this file first, e.g.:
+# its own. The deploy command must template this file first. The output
+# must stay in backend/ because `main = "worker.js"` is resolved
+# relative to the config file's directory:
 #   envsubst '$D1_DATABASE_ID_PREVIEW $D1_DATABASE_ID_PRODUCTION' \
-#     < backend/wrangler.toml > /tmp/wrangler.toml
-#   npx wrangler deploy --config /tmp/wrangler.toml [--env production]
+#     < backend/wrangler.toml > backend/wrangler.deploy.toml
+#   npx wrangler deploy --config backend/wrangler.deploy.toml [--env production]
 
 [[d1_databases]]
 binding = "auth_database"
