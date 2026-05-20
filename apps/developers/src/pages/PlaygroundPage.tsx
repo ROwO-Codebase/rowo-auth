@@ -14,13 +14,18 @@ interface ParamSpec {
   optional?: boolean;
 }
 
+// 'session'      → uses the dev panel's signed-in JWT as Bearer.
+// 'oauth-token'  → user pastes a rao_… into a special bearer_token field.
+// 'none'         → no auth header (client_id/client_secret go in the body).
+type EndpointAuth = 'session' | 'oauth-token' | 'none';
+
 interface EndpointSpec {
   id: string;
   label: string;
   method: 'GET' | 'POST';
   path: string;
   description: string;
-  auth: 'session' | 'none';
+  auth: EndpointAuth;
   params?: ParamSpec[];
 }
 
@@ -30,7 +35,7 @@ const ENDPOINTS: EndpointSpec[] = [
     label: 'GET /api/user/me',
     method: 'GET',
     path: '/api/user/me',
-    description: 'Returns the profile of the currently signed-in user.',
+    description: 'Returns the profile of the currently signed-in user (ROwO session JWT, not OAuth).',
     auth: 'session',
   },
   {
@@ -56,18 +61,59 @@ const ENDPOINTS: EndpointSpec[] = [
     ],
   },
   {
-    id: 'token',
-    label: 'POST /api/oauth/token',
+    id: 'token-code',
+    label: 'POST /api/oauth/token (authorization_code)',
     method: 'POST',
     path: '/api/oauth/token',
-    description: 'Exchange an authorization code for a user profile. No session required — this is the server-to-server call.',
+    description: 'Exchange an authorization code for an access_token + refresh_token. Server-to-server.',
     auth: 'none',
     params: [
       { name: 'grant_type', kind: 'string', placeholder: 'authorization_code' },
       { name: 'client_id', kind: 'string' },
-      { name: 'client_secret', kind: 'string', hint: 'Sent over the wire — only paste here when running against a local backend.' },
+      { name: 'client_secret', kind: 'string', hint: 'Sent over the wire — only paste here when running against a trusted backend.' },
       { name: 'code', kind: 'string' },
       { name: 'redirect_uri', kind: 'string' },
+    ],
+  },
+  {
+    id: 'token-refresh',
+    label: 'POST /api/oauth/token (refresh_token)',
+    method: 'POST',
+    path: '/api/oauth/token',
+    description: 'Rotate a refresh token for a new access_token + refresh_token pair. The old refresh_token becomes invalid on success.',
+    auth: 'none',
+    params: [
+      { name: 'grant_type', kind: 'string', placeholder: 'refresh_token' },
+      { name: 'client_id', kind: 'string' },
+      { name: 'client_secret', kind: 'string', hint: 'Sent over the wire — only paste here when running against a trusted backend.' },
+      { name: 'refresh_token', kind: 'string', placeholder: 'rro_…' },
+    ],
+  },
+  {
+    id: 'userinfo',
+    label: 'GET /api/oauth/userinfo',
+    method: 'GET',
+    path: '/api/oauth/userinfo',
+    description: 'Fetch the user profile granted to an OAuth client. Authenticated with an access_token (rao_…).',
+    auth: 'oauth-token',
+  },
+  {
+    id: 'list-grants',
+    label: 'GET /api/user/oauth/grants',
+    method: 'GET',
+    path: '/api/user/oauth/grants',
+    description: 'List the third-party apps the signed-in user has authorized.',
+    auth: 'session',
+  },
+  {
+    id: 'revoke-grant',
+    label: 'POST /api/user/oauth/grants/revoke',
+    method: 'POST',
+    path: '/api/user/oauth/grants/revoke',
+    description: 'Revoke a grant for the signed-in user. Cascades: all access/refresh tokens for the (user, client) pair die.',
+    auth: 'session',
+    params: [
+      { name: 'client_id', kind: 'string' },
     ],
   },
 ];
@@ -83,6 +129,7 @@ export default function PlaygroundPage() {
   const { user, loading } = useSession();
   const [selectedId, setSelectedId] = useState<string>(ENDPOINTS[0].id);
   const [values, setValues] = useState<Record<string, string>>({});
+  const [oauthAccessToken, setOauthAccessToken] = useState('');
   const [result, setResult] = useState<RequestResult | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +141,8 @@ export default function PlaygroundPage() {
   );
 
   const sessionToken = getSessionToken();
-  const needsAuthButMissing = endpoint.auth === 'session' && !sessionToken;
+  const needsSessionButMissing = endpoint.auth === 'session' && !sessionToken;
+  const needsOauthTokenButEmpty = endpoint.auth === 'oauth-token' && !oauthAccessToken.trim();
 
   const onSend = async () => {
     setPending(true);
@@ -108,7 +156,11 @@ export default function PlaygroundPage() {
     }
     const headers: Record<string, string> = {};
     if (endpoint.method === 'POST') headers['Content-Type'] = 'application/json';
-    if (endpoint.auth === 'session' && sessionToken) headers['Authorization'] = `Bearer ${sessionToken}`;
+    if (endpoint.auth === 'session' && sessionToken) {
+      headers['Authorization'] = `Bearer ${sessionToken}`;
+    } else if (endpoint.auth === 'oauth-token' && oauthAccessToken.trim()) {
+      headers['Authorization'] = `Bearer ${oauthAccessToken.trim()}`;
+    }
     const started = performance.now();
     try {
       const res = await fetch(`${__API_ENDPOINT__}${endpoint.path}`, {
@@ -131,7 +183,8 @@ export default function PlaygroundPage() {
   const curlSnippet = useMemo(() => {
     const lines: string[] = [`curl -X ${endpoint.method} '${__API_ENDPOINT__}${endpoint.path}'`];
     if (endpoint.method === 'POST') lines.push(`  -H 'Content-Type: application/json'`);
-    if (endpoint.auth === 'session') lines.push(`  -H 'Authorization: Bearer YOUR_TOKEN'`);
+    if (endpoint.auth === 'session') lines.push(`  -H 'Authorization: Bearer YOUR_SESSION_JWT'`);
+    if (endpoint.auth === 'oauth-token') lines.push(`  -H 'Authorization: Bearer rao_...'`);
     if (endpoint.method === 'POST' && endpoint.params) {
       const body: Record<string, string> = {};
       for (const p of endpoint.params) {
@@ -158,11 +211,11 @@ export default function PlaygroundPage() {
       </div>
       <p className="text-sm text-slate-500 mb-6">Call any endpoint with your session token, straight from this browser tab.</p>
 
-      {!loading && needsAuthButMissing && (
+      {!loading && needsSessionButMissing && (
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 flex items-start gap-3">
           <AlertTriangle className="w-4 h-4 mt-0.5 text-amber-700 flex-shrink-0" />
           <div className="flex-1 text-sm text-amber-900">
-            This endpoint needs a signed-in user. Sign in to populate the Authorization header automatically.
+            This endpoint needs a signed-in ROwO user. Sign in to populate the Authorization header automatically.
           </div>
           <button
             onClick={() => startSsoLogin('/playground')}
@@ -185,6 +238,24 @@ export default function PlaygroundPage() {
           ))}
         </select>
         <p className="text-xs text-slate-500 mb-4">{endpoint.description}</p>
+
+        {endpoint.auth === 'oauth-token' && (
+          <div className="mb-4">
+            <label className="block text-xs font-mono font-semibold text-slate-700 mb-1">
+              access_token
+            </label>
+            <input
+              type="text"
+              value={oauthAccessToken}
+              onChange={(e) => setOauthAccessToken(e.target.value)}
+              placeholder="rao_…"
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+            />
+            <p className="text-xs text-slate-500 mt-1">
+              Paste an access token returned by <code className="font-mono">/api/oauth/token</code>. Sent as <code className="font-mono">Authorization: Bearer …</code>.
+            </p>
+          </div>
+        )}
 
         {endpoint.params && endpoint.params.length > 0 && (
           <div className="space-y-3 mb-4">
@@ -209,7 +280,7 @@ export default function PlaygroundPage() {
         <div className="flex justify-end">
           <button
             onClick={onSend}
-            disabled={pending}
+            disabled={pending || needsOauthTokenButEmpty}
             className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium shadow-sm transition-colors disabled:opacity-50"
           >
             {pending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}

@@ -5497,6 +5497,21 @@ async function handleRequest(request, env, ctx) {
 
         if (method === 'DELETE' && !isRotate) {
           try {
+            // Cascade: drop everything tied to this client_id before the row
+            // itself goes, so no orphan tokens survive (and the FKs stay clean).
+            await execRun(
+              env,
+              `DELETE FROM oauth_access_tokens
+                WHERE grant_id IN (SELECT id FROM oauth_grants WHERE client_id = ?)`,
+              [targetClientId]
+            );
+            await execRun(
+              env,
+              `DELETE FROM oauth_refresh_tokens
+                WHERE grant_id IN (SELECT id FROM oauth_grants WHERE client_id = ?)`,
+              [targetClientId]
+            );
+            await execRun(env, 'DELETE FROM oauth_grants WHERE client_id = ?', [targetClientId]);
             await execRun(
               env,
               'DELETE FROM oauth_authorization_codes WHERE client_id = ?',
