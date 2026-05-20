@@ -10,10 +10,12 @@ placement = { mode = "smart" }
 # automatically; locally set it via .env / shell profile.
 #
 # database_id uses ${VAR} placeholders that Wrangler does NOT expand on
-# its own. The deploy command must template this file first, e.g.:
+# its own. The deploy command must template this file first. The output
+# must stay in backend/ because `main = "worker.js"` is resolved
+# relative to the config file's directory:
 #   envsubst '$D1_DATABASE_ID_PREVIEW $D1_DATABASE_ID_PRODUCTION' \
-#     < backend/wrangler.toml > /tmp/wrangler.toml
-#   npx wrangler deploy --config /tmp/wrangler.toml [--env production]
+#     < backend/wrangler.toml > backend/wrangler.deploy.toml
+#   npx wrangler deploy --config backend/wrangler.deploy.toml [--env production]
 
 [[d1_databases]]
 binding = "auth_database"
