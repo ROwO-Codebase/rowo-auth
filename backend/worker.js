@@ -3651,16 +3651,18 @@ async function handleRequest(request, env, ctx) {
         return jsonResponse({ success: false, message: 'Passkey registration verification failed.' }, 400);
       }
       const info = verification.registrationInfo;
-      const credential = info.credential || info; // shape varies across versions
-      const credentialIdB64 = credential.id;
-      const publicKeyBytes = credential.publicKey;
-      const counter = Number(credential.counter || 0);
+      const credentialIdB64 = info.credentialID;
+      const publicKeyBytes = info.credentialPublicKey;
+      const counter = Number(info.counter || 0);
       const transports = Array.isArray(attestation?.response?.transports)
         ? attestation.response.transports
         : null;
       const deviceType = info.credentialDeviceType || null;
       const backedUp = info.credentialBackedUp ? 1 : 0;
       const aaguid = info.aaguid || null;
+      if (!credentialIdB64 || !publicKeyBytes) {
+        return jsonResponse({ success: false, message: 'Passkey registration verification failed.' }, 400);
+      }
 
       const conflict = await queryFirst(
         env,
