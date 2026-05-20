@@ -138,6 +138,29 @@ CREATE TABLE oauth_authorization_codes (
   consumed_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE oauth_grants (
+  id TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL REFERENCES oauth_clients(client_id),
+  user_id TEXT NOT NULL REFERENCES user_accounts(id),
+  scopes TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_used_at TEXT,
+  revoked_at TEXT
+);
+CREATE TABLE oauth_access_tokens (
+  token_hash TEXT PRIMARY KEY,
+  grant_id TEXT NOT NULL REFERENCES oauth_grants(id),
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE oauth_refresh_tokens (
+  token_hash TEXT PRIMARY KEY,
+  grant_id TEXT NOT NULL REFERENCES oauth_grants(id),
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  revoked_at TEXT,
+  replaced_by_hash TEXT
+);
 DELETE FROM sqlite_sequence;
 CREATE INDEX idx_email_verification_expires_at
   ON email_verification_codes (expires_at);
@@ -166,6 +189,16 @@ CREATE INDEX idx_oauth_codes_expires_at
   ON oauth_authorization_codes(expires_at);
 CREATE INDEX idx_oauth_codes_user_id
   ON oauth_authorization_codes(user_id);
+CREATE UNIQUE INDEX idx_oauth_grants_client_user
+  ON oauth_grants(client_id, user_id);
+CREATE INDEX idx_oauth_grants_user_active
+  ON oauth_grants(user_id) WHERE revoked_at IS NULL;
+CREATE INDEX idx_oauth_access_tokens_grant_id
+  ON oauth_access_tokens(grant_id);
+CREATE INDEX idx_oauth_access_tokens_expires_at
+  ON oauth_access_tokens(expires_at);
+CREATE INDEX idx_oauth_refresh_tokens_grant_id
+  ON oauth_refresh_tokens(grant_id);
 CREATE INDEX idx_oauth_clients_owner
   ON oauth_clients(owner_user_id)
   WHERE owner_user_id IS NOT NULL;

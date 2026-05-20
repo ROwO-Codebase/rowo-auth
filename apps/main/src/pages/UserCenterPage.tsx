@@ -281,6 +281,8 @@ export default function UserCenterPage() {
             </button>
 
             <TwoFactorCard summary={twoFactor} onChanged={() => { void refresh(); }} />
+
+            <ConnectedAppsCard />
           </>
         )}
       </motion.div>
@@ -749,6 +751,183 @@ function PublicProfileBody({ account, notes }: { account: PublicAccount; notes: 
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+interface ConnectedAppGrant {
+  client_id: string;
+  display_name: string;
+  icon_url: string | null;
+  allowed_domain: string;
+  scopes: string[];
+  created_at: string;
+  last_used_at: string | null;
+}
+
+const CONNECTED_APP_SCOPE_LABELS: Record<string, string> = {
+  basic: 'Basic info',
+  verification: 'Verification info',
+  wechat: 'WeChat ID',
+};
+
+function ConnectedAppsCard() {
+  const [grants, setGrants] = useState<ConnectedAppGrant[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${__API_ENDPOINT__}/api/user/oauth/grants`, {
+        headers: { ...authHeaders() },
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setError(data.message || 'Could not load connected apps.');
+        setGrants([]);
+        return;
+      }
+      setGrants(Array.isArray(data.grants) ? data.grants : []);
+    } catch {
+      setError('Network error.');
+      setGrants([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const handleRevoke = async (clientId: string) => {
+    setRevokingId(clientId);
+    setError(null);
+    try {
+      const res = await fetch(`${__API_ENDPOINT__}/api/user/oauth/grants/revoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ client_id: clientId }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setError(data.message || 'Could not revoke access.');
+        return;
+      }
+      setConfirming(null);
+      await reload();
+    } catch {
+      setError('Network error.');
+    } finally {
+      setRevokingId(null);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 sm:p-8">
+      <div className="flex items-center gap-2 mb-1">
+        <Link2 className="w-5 h-5 text-indigo-600" />
+        <h2 className="text-lg font-semibold text-slate-900">Connected Apps</h2>
+      </div>
+      <p className="text-xs text-slate-500 mb-4">
+        Third-party apps you've authorized to access your ROwO account. Revoking removes their access immediately.
+      </p>
+
+      {loading && grants === null && (
+        <div className="flex items-center gap-2 text-sm text-slate-500">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          Loading…
+        </div>
+      )}
+
+      {error && (
+        <div className="bg-red-50 border border-red-100 rounded-xl p-3 mb-3 flex items-start gap-2 text-sm text-red-700">
+          <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {grants !== null && grants.length === 0 && !loading && (
+        <div className="text-sm text-slate-500">
+          You haven't authorized any third-party apps yet.
+        </div>
+      )}
+
+      {grants !== null && grants.length > 0 && (
+        <div className="space-y-3">
+          {grants.map((g) => (
+            <div
+              key={g.client_id}
+              className="border border-slate-200 rounded-2xl p-4 flex items-start gap-3"
+            >
+              {g.icon_url ? (
+                <img
+                  src={g.icon_url}
+                  alt=""
+                  className="w-10 h-10 rounded-xl object-cover flex-shrink-0"
+                />
+              ) : (
+                <div className="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-600 flex items-center justify-center flex-shrink-0">
+                  <Globe className="w-5 h-5" />
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-slate-900 truncate">{g.display_name}</div>
+                <div className="text-xs text-slate-500 truncate">{g.allowed_domain}</div>
+                <div className="text-xs text-slate-600 mt-2">
+                  Access:{' '}
+                  {g.scopes.length === 0
+                    ? 'none'
+                    : g.scopes.map((s) => CONNECTED_APP_SCOPE_LABELS[s] || s).join(', ')}
+                </div>
+                <div className="text-xs text-slate-400 mt-1">
+                  Connected {formatDate(g.created_at)}
+                  {g.last_used_at && ` · Last used ${formatDate(g.last_used_at)}`}
+                </div>
+                {confirming === g.client_id && (
+                  <div className="mt-3 bg-amber-50 border border-amber-100 rounded-xl p-3 text-xs text-amber-900">
+                    <div className="mb-2">
+                      Revoke access for <strong>{g.display_name}</strong>? They will need to re-authorize to access your account again.
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleRevoke(g.client_id)}
+                        disabled={revokingId === g.client_id}
+                        className="py-1.5 px-3 bg-red-600 hover:bg-red-700 disabled:bg-red-400 text-white font-medium rounded-lg text-xs flex items-center gap-1.5"
+                      >
+                        {revokingId === g.client_id && <Loader2 className="w-3 h-3 animate-spin" />}
+                        Revoke access
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirming(null)}
+                        disabled={revokingId === g.client_id}
+                        className="py-1.5 px-3 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-medium rounded-lg text-xs"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              {confirming !== g.client_id && (
+                <button
+                  type="button"
+                  onClick={() => setConfirming(g.client_id)}
+                  className="text-xs font-medium text-red-600 hover:text-red-700 px-3 py-1.5 rounded-lg hover:bg-red-50 flex-shrink-0"
+                >
+                  Revoke
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
