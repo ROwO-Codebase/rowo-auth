@@ -46,7 +46,7 @@ export default function TokenHelperPage() {
       <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4 mb-4 flex items-start gap-3">
         <Info className="w-4 h-4 mt-0.5 text-indigo-700 flex-shrink-0" />
         <div className="text-sm text-indigo-900">
-          The token you receive from <code className="font-mono text-xs">/api/oauth/token</code> is <strong>not</strong> a bearer token for further API calls — that response already contains the full user profile. This helper is for ROwO&rsquo;s own session JWTs (the ones the ROwO frontends store after a user signs in).
+          This helper is for ROwO&rsquo;s own session JWTs (the ones the ROwO frontends store after a user signs in) — it calls <code className="font-mono text-xs">/api/user/me</code>. For OAuth <code className="font-mono text-xs">access_token</code>s (<code className="font-mono text-xs">rao_…</code>) returned by <code className="font-mono text-xs">/api/oauth/token</code>, use <a href="/playground" className="underline">Playground &rarr; GET /api/oauth/userinfo</a> instead.
         </div>
       </div>
 

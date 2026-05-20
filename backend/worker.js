@@ -196,6 +196,10 @@ const PBKDF2_HASH_BYTES = 32;
 const USER_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const BIND_TOKEN_TTL_SECONDS = 10 * 60;
 const OAUTH_CODE_TTL_SECONDS = 15 * 60;
+const OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;            // 1 hour
+const OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
+const OAUTH_ACCESS_TOKEN_PREFIX = 'rao_';
+const OAUTH_REFRESH_TOKEN_PREFIX = 'rro_';
 const OAUTH_VALID_SCOPES = new Set(['basic', 'verification', 'wechat']);
 const OAUTH_GATED_SCOPES = new Set(['verification', 'wechat']);
 const LOGIN_ATTEMPTS_PER_MINUTE = 10;
@@ -1835,6 +1839,115 @@ function buildOAuthRedirect(redirectUri, params) {
   if (params.error) url.searchParams.set('error', params.error);
   if (params.state != null && params.state !== '') url.searchParams.set('state', String(params.state));
   return url.toString();
+}
+
+// UPSERT an authorization grant for (client_id, user_id). On an existing row we
+// clear revoked_at, overwrite scopes, and wipe all old access+refresh tokens —
+// re-authorization must not silently re-validate tokens the user thought were
+// dead. Returns the grant id.
+async function upsertOAuthGrant(env, clientId, userId, scopes) {
+  const existing = await queryFirst(
+    env,
+    'SELECT id FROM oauth_grants WHERE client_id = ? AND user_id = ?',
+    [clientId, userId]
+  );
+  const scopesJson = JSON.stringify(scopes);
+  if (existing) {
+    await execRun(env, 'DELETE FROM oauth_access_tokens WHERE grant_id = ?', [existing.id]);
+    await execRun(env, 'DELETE FROM oauth_refresh_tokens WHERE grant_id = ?', [existing.id]);
+    await execRun(
+      env,
+      `UPDATE oauth_grants
+          SET scopes = ?, revoked_at = NULL, last_used_at = datetime('now')
+        WHERE id = ?`,
+      [scopesJson, existing.id]
+    );
+    return existing.id;
+  }
+  const id = randomHex(16);
+  await execRun(
+    env,
+    `INSERT INTO oauth_grants (id, client_id, user_id, scopes, created_at, last_used_at)
+     VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))`,
+    [id, clientId, userId, scopesJson]
+  );
+  return id;
+}
+
+// Mint a fresh access+refresh pair for an existing grant. Stores sha256 hashes;
+// the raw tokens (with rao_/rro_ prefixes) are returned to the caller exactly
+// once.
+async function issueOAuthTokenPair(env, grantId) {
+  const now = Date.now();
+  const accessRaw = OAUTH_ACCESS_TOKEN_PREFIX + randomHex(32);
+  const refreshRaw = OAUTH_REFRESH_TOKEN_PREFIX + randomHex(32);
+  const accessHash = await sha256Hex(accessRaw);
+  const refreshHash = await sha256Hex(refreshRaw);
+  const accessExpiresAt = new Date(now + OAUTH_ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString();
+  const refreshExpiresAt = new Date(now + OAUTH_REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString();
+  await execRun(
+    env,
+    `INSERT INTO oauth_access_tokens (token_hash, grant_id, expires_at, created_at)
+     VALUES (?, ?, ?, datetime('now'))`,
+    [accessHash, grantId, accessExpiresAt]
+  );
+  await execRun(
+    env,
+    `INSERT INTO oauth_refresh_tokens (token_hash, grant_id, expires_at, created_at)
+     VALUES (?, ?, ?, datetime('now'))`,
+    [refreshHash, grantId, refreshExpiresAt]
+  );
+  return {
+    accessToken: accessRaw,
+    accessHash,
+    accessExpiresAt,
+    refreshToken: refreshRaw,
+    refreshHash,
+    refreshExpiresAt,
+  };
+}
+
+// Build the scoped user-info payload returned by /api/oauth/userinfo. Mirrors
+// the verification block in /api/user/me exactly so consumers see one shape.
+async function buildOAuthUserInfo(env, user, grantedScopes) {
+  const response = {
+    success: true,
+    scope: grantedScopes.join(' '),
+    user: {
+      user_id: user.id,
+      username_display: user.username_display,
+    },
+  };
+  const wantsVerification = grantedScopes.includes('verification');
+  const wantsWechat = grantedScopes.includes('wechat');
+  let partial = false;
+  if ((wantsVerification || wantsWechat) && user.wechat_id) {
+    const accountRow = await queryFirst(
+      env,
+      `SELECT wechat_id, verified_status, verification_method, verification_time, reverified_at
+         FROM accounts WHERE wechat_id = ?`,
+      [user.wechat_id]
+    );
+    if (wantsVerification) {
+      if (accountRow) {
+        response.verification = {
+          verified_status: Number(accountRow.verified_status) === 1,
+          verification_method: accountRow.verification_method || null,
+          verification_time: accountRow.verification_time || null,
+          reverified_at: accountRow.reverified_at || null,
+        };
+      } else {
+        partial = true;
+      }
+    }
+    if (wantsWechat) {
+      response.wechat = { wechat_id: user.wechat_id };
+    }
+  } else if (wantsVerification || wantsWechat) {
+    partial = true;
+  }
+  if (partial) response.partial = true;
+  return response;
 }
 
 function serializeDeveloperOauthClient(row) {
@@ -4950,17 +5063,21 @@ async function handleRequest(request, env, ctx) {
       const grantType = body.grant_type != null ? String(body.grant_type).trim() : '';
       const clientId = body.client_id != null ? String(body.client_id).trim() : '';
       const clientSecret = body.client_secret != null ? String(body.client_secret) : '';
-      const code = body.code != null ? String(body.code).trim() : '';
-      const redirectUri = body.redirect_uri != null ? String(body.redirect_uri).trim() : '';
-      if (grantType !== 'authorization_code') {
-        return jsonResponse({ success: false, message: 'Only grant_type=authorization_code is supported.' }, 400);
-      }
-      if (!clientId || !clientSecret || !code || !redirectUri) {
+      if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
         return jsonResponse({
           success: false,
-          message: 'client_id, client_secret, code, and redirect_uri are required.',
+          message: 'grant_type must be authorization_code or refresh_token.',
         }, 400);
       }
+      if (!clientId || !clientSecret) {
+        return jsonResponse({
+          success: false,
+          message: 'client_id and client_secret are required.',
+        }, 400);
+      }
+
+      // Client credential check (shared between branches). The HMAC always
+      // runs to keep timing flat even when the client_id is unknown.
       const client = await queryFirst(
         env,
         'SELECT * FROM oauth_clients WHERE client_id = ? AND is_active = 1',
@@ -4981,90 +5098,213 @@ async function handleRequest(request, env, ctx) {
       if (!timingSafeEqual(presentedBytes, expectedBytes)) {
         return jsonResponse({ success: false, message: 'Invalid client credentials.' }, 401);
       }
-      const codeHash = await sha256Hex(code);
-      const row = await queryFirst(
-        env,
-        'SELECT * FROM oauth_authorization_codes WHERE code_hash = ?',
-        [codeHash]
-      );
-      if (!row) {
-        return jsonResponse({ success: false, message: 'Invalid authorization code.' }, 400);
-      }
-      if (row.client_id !== clientId) {
-        return jsonResponse({ success: false, message: 'Authorization code was not issued to this client.' }, 400);
-      }
-      if (row.redirect_uri !== redirectUri) {
-        return jsonResponse({ success: false, message: 'redirect_uri does not match the original authorize request.' }, 400);
-      }
-      if (row.consumed_at != null) {
-        // TODO: OAuth replay defense — invalidate all other unused codes for
-        // this (client_id, user_id) when a consumed code is presented again.
-        return jsonResponse({ success: false, message: 'Authorization code has already been used.' }, 400);
-      }
-      if (new Date(row.expires_at) <= new Date()) {
-        try {
-          await execRun(env, 'DELETE FROM oauth_authorization_codes WHERE code_hash = ?', [codeHash]);
-        } catch (error) {
-          logServerError('oauth_token_expired_cleanup', error);
+
+      if (grantType === 'authorization_code') {
+        const code = body.code != null ? String(body.code).trim() : '';
+        const redirectUri = body.redirect_uri != null ? String(body.redirect_uri).trim() : '';
+        if (!code || !redirectUri) {
+          return jsonResponse({
+            success: false,
+            message: 'code and redirect_uri are required for grant_type=authorization_code.',
+          }, 400);
         }
-        return jsonResponse({ success: false, message: 'Authorization code has expired.' }, 400);
+        const codeHash = await sha256Hex(code);
+        const row = await queryFirst(
+          env,
+          'SELECT * FROM oauth_authorization_codes WHERE code_hash = ?',
+          [codeHash]
+        );
+        if (!row) {
+          return jsonResponse({ success: false, message: 'Invalid authorization code.' }, 400);
+        }
+        if (row.client_id !== clientId) {
+          return jsonResponse({ success: false, message: 'Authorization code was not issued to this client.' }, 400);
+        }
+        if (row.redirect_uri !== redirectUri) {
+          return jsonResponse({ success: false, message: 'redirect_uri does not match the original authorize request.' }, 400);
+        }
+        if (row.consumed_at != null) {
+          // TODO: OAuth replay defense — invalidate all other unused codes for
+          // this (client_id, user_id) when a consumed code is presented again.
+          return jsonResponse({ success: false, message: 'Authorization code has already been used.' }, 400);
+        }
+        if (new Date(row.expires_at) <= new Date()) {
+          try {
+            await execRun(env, 'DELETE FROM oauth_authorization_codes WHERE code_hash = ?', [codeHash]);
+          } catch (error) {
+            logServerError('oauth_token_expired_cleanup', error);
+          }
+          return jsonResponse({ success: false, message: 'Authorization code has expired.' }, 400);
+        }
+        const consumeResult = await execRun(
+          env,
+          "UPDATE oauth_authorization_codes SET consumed_at = datetime('now') WHERE code_hash = ? AND consumed_at IS NULL",
+          [codeHash]
+        );
+        if (Number(consumeResult?.meta?.changes || 0) === 0) {
+          return jsonResponse({ success: false, message: 'Authorization code has already been used.' }, 400);
+        }
+        const user = await queryFirst(env, 'SELECT id FROM user_accounts WHERE id = ?', [row.user_id]);
+        if (!user) {
+          return jsonResponse({ success: false, message: 'User account no longer exists.' }, 410);
+        }
+        let grantedScopes;
+        try {
+          grantedScopes = parseJsonArrayField(row.granted_scopes, 'granted_scopes');
+        } catch (error) {
+          return genericError('oauth_token_scopes', error, 500, 'Stored grant is malformed.');
+        }
+
+        let grantId;
+        try {
+          grantId = await upsertOAuthGrant(env, clientId, user.id, grantedScopes);
+        } catch (error) {
+          return genericError('oauth_token_upsert_grant', error);
+        }
+        let pair;
+        try {
+          pair = await issueOAuthTokenPair(env, grantId);
+        } catch (error) {
+          return genericError('oauth_token_issue_pair', error);
+        }
+        return jsonResponse({
+          success: true,
+          access_token: pair.accessToken,
+          refresh_token: pair.refreshToken,
+          token_type: 'Bearer',
+          expires_in: OAUTH_ACCESS_TOKEN_TTL_SECONDS,
+          refresh_expires_in: OAUTH_REFRESH_TOKEN_TTL_SECONDS,
+          scope: grantedScopes.join(' '),
+        });
       }
-      const consumeResult = await execRun(
+
+      // grantType === 'refresh_token'
+      const refreshTokenRaw = body.refresh_token != null ? String(body.refresh_token).trim() : '';
+      if (!refreshTokenRaw) {
+        return jsonResponse({
+          success: false,
+          message: 'refresh_token is required for grant_type=refresh_token.',
+        }, 400);
+      }
+      const refreshHash = await sha256Hex(refreshTokenRaw);
+      const refreshRow = await queryFirst(
         env,
-        "UPDATE oauth_authorization_codes SET consumed_at = datetime('now') WHERE code_hash = ? AND consumed_at IS NULL",
-        [codeHash]
+        `SELECT rt.*, g.client_id AS grant_client_id, g.user_id AS grant_user_id,
+                g.scopes AS grant_scopes, g.revoked_at AS grant_revoked_at
+           FROM oauth_refresh_tokens rt
+           JOIN oauth_grants g ON g.id = rt.grant_id
+          WHERE rt.token_hash = ?`,
+        [refreshHash]
       );
-      if (Number(consumeResult?.meta?.changes || 0) === 0) {
-        return jsonResponse({ success: false, message: 'Authorization code has already been used.' }, 400);
+      if (!refreshRow) {
+        return jsonResponse({ success: false, message: 'Invalid refresh token.' }, 401);
       }
-      const user = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [row.user_id]);
+      if (refreshRow.grant_client_id !== clientId) {
+        return jsonResponse({ success: false, message: 'Refresh token was not issued to this client.' }, 401);
+      }
+      if (refreshRow.grant_revoked_at) {
+        return jsonResponse({ success: false, message: 'Authorization has been revoked.' }, 401);
+      }
+      if (new Date(refreshRow.expires_at) <= new Date()) {
+        return jsonResponse({ success: false, message: 'Refresh token has expired.' }, 401);
+      }
+      if (refreshRow.revoked_at) {
+        // Reuse of an already-rotated refresh token — likely token theft.
+        // Revoke the whole grant so neither side can keep using it.
+        try {
+          await execRun(
+            env,
+            "UPDATE oauth_grants SET revoked_at = datetime('now') WHERE id = ?",
+            [refreshRow.grant_id]
+          );
+          await execRun(env, 'DELETE FROM oauth_access_tokens WHERE grant_id = ?', [refreshRow.grant_id]);
+          await execRun(
+            env,
+            "UPDATE oauth_refresh_tokens SET revoked_at = datetime('now') WHERE grant_id = ? AND revoked_at IS NULL",
+            [refreshRow.grant_id]
+          );
+        } catch (error) {
+          logServerError('oauth_refresh_reuse_revoke', error);
+        }
+        return jsonResponse({ success: false, message: 'Refresh token has already been used.' }, 401);
+      }
+
+      let grantedScopes;
+      try {
+        grantedScopes = parseJsonArrayField(refreshRow.grant_scopes, 'grant_scopes');
+      } catch (error) {
+        return genericError('oauth_refresh_scopes', error, 500, 'Stored grant is malformed.');
+      }
+      let newPair;
+      try {
+        newPair = await issueOAuthTokenPair(env, refreshRow.grant_id);
+      } catch (error) {
+        return genericError('oauth_refresh_issue_pair', error);
+      }
+      try {
+        await execRun(
+          env,
+          `UPDATE oauth_refresh_tokens
+              SET revoked_at = datetime('now'), replaced_by_hash = ?
+            WHERE token_hash = ?`,
+          [newPair.refreshHash, refreshHash]
+        );
+        await execRun(
+          env,
+          "UPDATE oauth_grants SET last_used_at = datetime('now') WHERE id = ?",
+          [refreshRow.grant_id]
+        );
+      } catch (error) {
+        logServerError('oauth_refresh_rotate', error);
+      }
+      return jsonResponse({
+        success: true,
+        access_token: newPair.accessToken,
+        refresh_token: newPair.refreshToken,
+        token_type: 'Bearer',
+        expires_in: OAUTH_ACCESS_TOKEN_TTL_SECONDS,
+        refresh_expires_in: OAUTH_REFRESH_TOKEN_TTL_SECONDS,
+        scope: grantedScopes.join(' '),
+      });
+    }
+
+    if (method === 'GET' && pathname === '/api/oauth/userinfo') {
+      const authHeader = request.headers.get('authorization') || '';
+      const accessRaw = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+      if (!accessRaw) {
+        return jsonResponse({ success: false, message: 'Bearer access token is required.' }, 401);
+      }
+      const accessHash = await sha256Hex(accessRaw);
+      const tokenRow = await queryFirst(
+        env,
+        `SELECT at.expires_at, g.user_id AS grant_user_id, g.scopes AS grant_scopes,
+                g.revoked_at AS grant_revoked_at
+           FROM oauth_access_tokens at
+           JOIN oauth_grants g ON g.id = at.grant_id
+          WHERE at.token_hash = ?`,
+        [accessHash]
+      );
+      if (!tokenRow) {
+        return jsonResponse({ success: false, message: 'Invalid access token.' }, 401);
+      }
+      if (tokenRow.grant_revoked_at) {
+        return jsonResponse({ success: false, message: 'Authorization has been revoked.' }, 401);
+      }
+      if (new Date(tokenRow.expires_at) <= new Date()) {
+        return jsonResponse({ success: false, message: 'Access token has expired.' }, 401);
+      }
+      const user = await queryFirst(env, 'SELECT * FROM user_accounts WHERE id = ?', [tokenRow.grant_user_id]);
       if (!user) {
         return jsonResponse({ success: false, message: 'User account no longer exists.' }, 410);
       }
       let grantedScopes;
       try {
-        grantedScopes = parseJsonArrayField(row.granted_scopes, 'granted_scopes');
+        grantedScopes = parseJsonArrayField(tokenRow.grant_scopes, 'grant_scopes');
       } catch (error) {
-        return genericError('oauth_token_scopes', error, 500, 'Stored grant is malformed.');
+        return genericError('oauth_userinfo_scopes', error, 500, 'Stored grant is malformed.');
       }
-      const response = {
-        success: true,
-        scope: grantedScopes.join(' '),
-        user: {
-          user_id: user.id,
-          username_display: user.username_display,
-        },
-      };
-      const wantsVerification = grantedScopes.includes('verification');
-      const wantsWechat = grantedScopes.includes('wechat');
-      let partial = false;
-      if ((wantsVerification || wantsWechat) && user.wechat_id) {
-        const accountRow = await queryFirst(
-          env,
-          `SELECT wechat_id, verified_status, verification_method, verification_time, reverified_at
-             FROM accounts WHERE wechat_id = ?`,
-          [user.wechat_id]
-        );
-        if (wantsVerification) {
-          if (accountRow) {
-            response.verification = {
-              verified_status: Number(accountRow.verified_status) === 1,
-              verification_method: accountRow.verification_method || null,
-              verification_time: accountRow.verification_time || null,
-              reverified_at: accountRow.reverified_at || null,
-            };
-          } else {
-            partial = true;
-          }
-        }
-        if (wantsWechat) {
-          response.wechat = { wechat_id: user.wechat_id };
-        }
-      } else if (wantsVerification || wantsWechat) {
-        partial = true;
-      }
-      if (partial) response.partial = true;
-      return jsonResponse(response);
+      const info = await buildOAuthUserInfo(env, user, grantedScopes);
+      return jsonResponse(info);
     }
 
     // --------------------------------------------------------------------
@@ -5257,6 +5497,21 @@ async function handleRequest(request, env, ctx) {
 
         if (method === 'DELETE' && !isRotate) {
           try {
+            // Cascade: drop everything tied to this client_id before the row
+            // itself goes, so no orphan tokens survive (and the FKs stay clean).
+            await execRun(
+              env,
+              `DELETE FROM oauth_access_tokens
+                WHERE grant_id IN (SELECT id FROM oauth_grants WHERE client_id = ?)`,
+              [targetClientId]
+            );
+            await execRun(
+              env,
+              `DELETE FROM oauth_refresh_tokens
+                WHERE grant_id IN (SELECT id FROM oauth_grants WHERE client_id = ?)`,
+              [targetClientId]
+            );
+            await execRun(env, 'DELETE FROM oauth_grants WHERE client_id = ?', [targetClientId]);
             await execRun(
               env,
               'DELETE FROM oauth_authorization_codes WHERE client_id = ?',
@@ -5275,6 +5530,65 @@ async function handleRequest(request, env, ctx) {
 
         return jsonResponse({ success: false, message: 'Method not allowed.' }, 405);
       }
+    }
+
+    if (method === 'GET' && pathname === '/api/user/oauth/grants') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const rows = await queryAll(
+        env,
+        `SELECT g.id AS grant_id, g.scopes, g.created_at, g.last_used_at,
+                c.client_id, c.display_name, c.icon_url, c.allowed_domain
+           FROM oauth_grants g
+           JOIN oauth_clients c ON c.client_id = g.client_id
+          WHERE g.user_id = ? AND g.revoked_at IS NULL
+          ORDER BY g.last_used_at DESC, g.created_at DESC`,
+        [auth.user.id]
+      );
+      const grants = rows.map((row) => {
+        let scopes = [];
+        try { scopes = parseJsonArrayField(row.scopes, 'scopes'); } catch { /* keep [] */ }
+        return {
+          client_id: row.client_id,
+          display_name: row.display_name,
+          icon_url: row.icon_url || null,
+          allowed_domain: row.allowed_domain,
+          scopes,
+          created_at: row.created_at,
+          last_used_at: row.last_used_at || null,
+        };
+      });
+      return jsonResponse({ success: true, grants });
+    }
+
+    if (method === 'POST' && pathname === '/api/user/oauth/grants/revoke') {
+      const auth = await requireUserAuth(request, env);
+      if (auth.response) return auth.response;
+      const body = await parseJson(request);
+      const targetClientId = body.client_id != null ? String(body.client_id).trim() : '';
+      if (!targetClientId) {
+        return jsonResponse({ success: false, message: 'client_id is required.' }, 400);
+      }
+      const grant = await queryFirst(
+        env,
+        'SELECT id FROM oauth_grants WHERE client_id = ? AND user_id = ? AND revoked_at IS NULL',
+        [targetClientId, auth.user.id]
+      );
+      if (!grant) {
+        return jsonResponse({ success: true, revoked: false, message: 'No active grant for this client.' });
+      }
+      try {
+        await execRun(env, 'DELETE FROM oauth_access_tokens WHERE grant_id = ?', [grant.id]);
+        await execRun(env, 'DELETE FROM oauth_refresh_tokens WHERE grant_id = ?', [grant.id]);
+        await execRun(
+          env,
+          "UPDATE oauth_grants SET revoked_at = datetime('now') WHERE id = ?",
+          [grant.id]
+        );
+      } catch (error) {
+        return genericError('oauth_grant_revoke', error);
+      }
+      return jsonResponse({ success: true, revoked: true });
     }
 
   return jsonResponse({ success: false, message: 'Route not found.' }, 404);

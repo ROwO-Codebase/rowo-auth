@@ -177,7 +177,7 @@ export default function ClientDetailPage() {
       <div className="bg-white border border-rose-200 rounded-3xl p-6">
         <h2 className="font-semibold text-rose-900 mb-1">Delete client</h2>
         <p className="text-sm text-rose-700/80 mb-4">
-          Permanently removes the client and revokes any outstanding authorization codes. Users who signed in via this app keep their ROwO account.
+          Permanently removes the client and wipes every grant, access token, refresh token, and outstanding authorization code tied to it. Users who signed in via this app keep their ROwO account.
         </p>
         <button
           onClick={() => setConfirmDelete(true)}
