@@ -68,6 +68,7 @@ function formatDate(s: string | null | undefined): string {
 export default function UserCenterPage() {
   const navigate = useNavigate();
   const { user, verification, twoFactor, loading, signOut, refresh } = useSession();
+  const [tab, setTab] = useState<'general' | 'security'>('general');
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [publicProfile, setPublicProfile] = useState<PublicProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -141,114 +142,147 @@ export default function UserCenterPage() {
           </div>
         </div>
 
-        <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 sm:p-8">
-          <div className="flex items-center gap-2 mb-4">
-            <ShieldCheck className="w-5 h-5 text-indigo-600" />
-            <h2 className="text-lg font-semibold text-slate-900">WeChat Binding</h2>
-          </div>
-
-          {user.wechat_id ? (
-            <div className="space-y-3">
-              <div>
-                <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">Bound WeChat ID</div>
-                <div className="font-mono text-sm break-all">{user.wechat_id}</div>
-              </div>
-
-              {verification?.missing && (
-                <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-sm text-amber-800 flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                  <span>The verification record for this WeChat ID no longer exists. Contact an admin.</span>
-                </div>
-              )}
-
-              {lastChangeAt && (
-                <div className="text-xs text-slate-500 pt-2 border-t border-slate-100 mt-3">
-                  Last WeChat change: {formatDate(user.last_wechat_change_at)}
-                  {nextEligibleDate && !canChangeWechat && (
-                    <span> · Next change eligible {format(nextEligibleDate, 'yyyy-MM-dd')}</span>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 text-sm text-amber-800">
-              <div className="font-medium mb-1">No WeChat ID bound</div>
-              <p className="text-xs leading-relaxed">
-                Verify a WeChat ID to link it to your ROwO account, or contact an admin if your
-                WeChat ID was manually or batch-verified.
-              </p>
-            </div>
-          )}
+        <div className="flex gap-1 p-1 bg-slate-100 rounded-xl">
+          <button
+            type="button"
+            onClick={() => setTab('general')}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              tab === 'general'
+                ? 'bg-white text-indigo-700 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <User className="w-4 h-4" />
+            General
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('security')}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              tab === 'security'
+                ? 'bg-white text-indigo-700 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Shield className="w-4 h-4" />
+            Security
+          </button>
         </div>
 
-        {user.wechat_id && (
-          <PublicProfileCard
-            wechatId={user.wechat_id}
-            profile={publicProfile}
-            loading={profileLoading}
-            error={profileError}
-            onRefresh={() => loadPublicProfile(user.wechat_id!)}
-          />
+        {tab === 'general' && (
+          <>
+            <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 sm:p-8">
+              <div className="flex items-center gap-2 mb-4">
+                <ShieldCheck className="w-5 h-5 text-indigo-600" />
+                <h2 className="text-lg font-semibold text-slate-900">WeChat Binding</h2>
+              </div>
+
+              {user.wechat_id ? (
+                <div className="space-y-3">
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">Bound WeChat ID</div>
+                    <div className="font-mono text-sm break-all">{user.wechat_id}</div>
+                  </div>
+
+                  {verification?.missing && (
+                    <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-sm text-amber-800 flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                      <span>The verification record for this WeChat ID no longer exists. Contact an admin.</span>
+                    </div>
+                  )}
+
+                  {lastChangeAt && (
+                    <div className="text-xs text-slate-500 pt-2 border-t border-slate-100 mt-3">
+                      Last WeChat change: {formatDate(user.last_wechat_change_at)}
+                      {nextEligibleDate && !canChangeWechat && (
+                        <span> · Next change eligible {format(nextEligibleDate, 'yyyy-MM-dd')}</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 text-sm text-amber-800">
+                  <div className="font-medium mb-1">No WeChat ID bound</div>
+                  <p className="text-xs leading-relaxed">
+                    Verify a WeChat ID to link it to your ROwO account, or contact an admin if your
+                    WeChat ID was manually or batch-verified.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {user.wechat_id && (
+              <PublicProfileCard
+                wechatId={user.wechat_id}
+                profile={publicProfile}
+                loading={profileLoading}
+                error={profileError}
+                onRefresh={() => loadPublicProfile(user.wechat_id!)}
+              />
+            )}
+
+            {user.wechat_id ? (
+              <button
+                disabled={!canChangeWechat}
+                onClick={() => navigate('/verify')}
+                className="w-full bg-white border border-slate-200 rounded-2xl p-5 text-left hover:border-indigo-300 hover:shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-start gap-3"
+              >
+                <RefreshCw className="w-5 h-5 text-indigo-600 mt-0.5" />
+                <div>
+                  <div className="font-medium text-slate-900">Change WeChat ID</div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    {canChangeWechat
+                      ? 'Verify the new WeChat ID, then confirm with your password.'
+                      : `Available again on ${format(nextEligibleDate!, 'yyyy-MM-dd')}.`}
+                  </div>
+                </div>
+              </button>
+            ) : (
+              <Link
+                to="/verify"
+                className="w-full bg-white border border-slate-200 rounded-2xl p-5 text-left hover:border-indigo-300 hover:shadow-sm transition-all flex items-start gap-3"
+              >
+                <Link2 className="w-5 h-5 text-indigo-600 mt-0.5" />
+                <div>
+                  <div className="font-medium text-slate-900">Bind WeChat ID</div>
+                  <div className="text-xs text-slate-500 mt-1">Run a verification flow and link the result.</div>
+                </div>
+              </Link>
+            )}
+
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center justify-between">
+              <div className="text-sm text-slate-500">Sign out of this browser.</div>
+              <button
+                onClick={handleSignOut}
+                className="py-2 px-4 bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium rounded-xl shadow-sm transition-colors flex items-center gap-2"
+              >
+                <LogOut className="w-4 h-4" />
+                Sign out
+              </button>
+            </div>
+          </>
         )}
 
-        <div className="grid sm:grid-cols-2 gap-4">
-          {user.wechat_id ? (
+        {tab === 'security' && (
+          <>
             <button
-              disabled={!canChangeWechat}
-              onClick={() => navigate('/verify')}
-              className="bg-white border border-slate-200 rounded-2xl p-5 text-left hover:border-indigo-300 hover:shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-start gap-3"
+              onClick={() => setShowPasswordModal(true)}
+              className="w-full bg-white border border-slate-200 rounded-2xl p-5 text-left hover:border-indigo-300 hover:shadow-sm transition-all flex items-start gap-3"
             >
-              <RefreshCw className="w-5 h-5 text-indigo-600 mt-0.5" />
+              <KeyRound className="w-5 h-5 text-indigo-600 mt-0.5" />
               <div>
-                <div className="font-medium text-slate-900">Change WeChat ID</div>
+                <div className="font-medium text-slate-900">Change Password</div>
                 <div className="text-xs text-slate-500 mt-1">
-                  {canChangeWechat
-                    ? 'Verify the new WeChat ID, then confirm with your password.'
-                    : `Available again on ${format(nextEligibleDate!, 'yyyy-MM-dd')}.`}
+                  {(twoFactor?.totp_enabled || (twoFactor?.passkeys.length ?? 0) > 0)
+                    ? 'Requires current password and 2FA.'
+                    : 'Requires current password.'}
                 </div>
               </div>
             </button>
-          ) : (
-            <Link
-              to="/verify"
-              className="bg-white border border-slate-200 rounded-2xl p-5 text-left hover:border-indigo-300 hover:shadow-sm transition-all flex items-start gap-3"
-            >
-              <Link2 className="w-5 h-5 text-indigo-600 mt-0.5" />
-              <div>
-                <div className="font-medium text-slate-900">Bind WeChat ID</div>
-                <div className="text-xs text-slate-500 mt-1">Run a verification flow and link the result.</div>
-              </div>
-            </Link>
-          )}
 
-          <button
-            onClick={() => setShowPasswordModal(true)}
-            className="bg-white border border-slate-200 rounded-2xl p-5 text-left hover:border-indigo-300 hover:shadow-sm transition-all flex items-start gap-3"
-          >
-            <KeyRound className="w-5 h-5 text-indigo-600 mt-0.5" />
-            <div>
-              <div className="font-medium text-slate-900">Change Password</div>
-              <div className="text-xs text-slate-500 mt-1">
-                {(twoFactor?.totp_enabled || (twoFactor?.passkeys.length ?? 0) > 0)
-                  ? 'Requires current password and 2FA.'
-                  : 'Requires current password.'}
-              </div>
-            </div>
-          </button>
-        </div>
-
-        <TwoFactorCard summary={twoFactor} onChanged={() => { void refresh(); }} />
-
-        <div className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center justify-between">
-          <div className="text-sm text-slate-500">Sign out of this browser.</div>
-          <button
-            onClick={handleSignOut}
-            className="py-2 px-4 bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium rounded-xl shadow-sm transition-colors flex items-center gap-2"
-          >
-            <LogOut className="w-4 h-4" />
-            Sign out
-          </button>
-        </div>
+            <TwoFactorCard summary={twoFactor} onChanged={() => { void refresh(); }} />
+          </>
+        )}
       </motion.div>
 
       <AnimatePresence>
