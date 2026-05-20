@@ -857,9 +857,9 @@ async function verifyPasskeyAssertionForUser(env, request, userId, assertion, ch
       expectedChallenge: String(challengePayload.challenge),
       expectedOrigin: rpInfo.origin,
       expectedRPID: rpInfo.rpID,
-      credential: {
-        id: row.credential_id_b64url,
-        publicKey: base64UrlBytes(row.public_key_b64url),
+      authenticator: {
+        credentialID: row.credential_id_b64url,
+        credentialPublicKey: base64UrlBytes(row.public_key_b64url),
         counter: Number(row.counter) || 0,
         transports: row.transports ? safeJsonArray(row.transports) : undefined,
       },
