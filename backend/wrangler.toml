@@ -6,8 +6,14 @@ workers_dev = false
 placement = { mode = "smart" }
 
 # account_id is provided via the CLOUDFLARE_ACCOUNT_ID env var (read
-# natively by Wrangler). Set it in CI as a secret, or locally via .env
-# / shell profile before running `wrangler dev` or `wrangler deploy`.
+# natively by Wrangler). Cloudflare Workers Builds supplies this
+# automatically; locally set it via .env / shell profile.
+#
+# database_id uses ${VAR} placeholders that Wrangler does NOT expand on
+# its own. The deploy command must template this file first, e.g.:
+#   envsubst '$D1_DATABASE_ID_PREVIEW $D1_DATABASE_ID_PRODUCTION' \
+#     < backend/wrangler.toml > /tmp/wrangler.toml
+#   npx wrangler deploy --config /tmp/wrangler.toml [--env production]
 
 [[d1_databases]]
 binding = "auth_database"
@@ -41,11 +47,27 @@ WEBAUTHN_ALLOWED_ORIGINS = "https://rowo.link"
 name = "rowo-auth"
 compatibility_flags = ["nodejs_compat"]
 placement = { mode = "smart" }
+preview_urls = false
+
+[[env.production.routes]]
+pattern = "api.rowo.link"
+zone_name = "rowo.link"
+custom_domain = true
 
 [[env.production.d1_databases]]
 binding = "auth_database"
 database_name = "rowo-auth-db"
 database_id = "${D1_DATABASE_ID_PRODUCTION}"
+
+[[env.production.r2_buckets]]
+binding = "auth_logs_bucket"
+bucket_name = "rowo-auth-logs"
+
+[env.production.observability]
+enabled = true
+
+[env.production.observability.logs]
+enabled = true
 
 [env.production.vars]
 ALLOWED_EMAIL_DOMAIN = "uwaterloo.ca"
