@@ -1324,7 +1324,7 @@ async function getCachedDiscordVerification(env, plainDiscordId) {
   const row = await queryFirst(
     env,
     `
-      SELECT discord_id, discord_name, guild_id, role_id
+      SELECT discord_id, discord_name, guild_id, role_id, matched_email_hash
       FROM discord_verified_identities
       WHERE discord_id IN (?, ?)
       LIMIT 1
@@ -1339,15 +1339,16 @@ async function getCachedDiscordVerification(env, plainDiscordId) {
       await execRun(
         env,
         `
-          INSERT INTO discord_verified_identities (discord_id, discord_name, guild_id, role_id, created_at, updated_at)
-          VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+          INSERT INTO discord_verified_identities (discord_id, discord_name, guild_id, role_id, matched_email_hash, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
           ON CONFLICT(discord_id) DO UPDATE SET
             discord_name = excluded.discord_name,
             guild_id = excluded.guild_id,
             role_id = excluded.role_id,
+            matched_email_hash = excluded.matched_email_hash,
             updated_at = datetime('now')
         `,
-        [v2, row.discord_name, row.guild_id, row.role_id]
+        [v2, row.discord_name, row.guild_id, row.role_id, row.matched_email_hash]
       );
       row.discord_id = v2;
     } catch (error) {
@@ -1357,7 +1358,7 @@ async function getCachedDiscordVerification(env, plainDiscordId) {
   return row;
 }
 
-async function cacheDiscordVerification(env, discordId, discordName, guildId, roleId) {
+async function cacheDiscordVerification(env, discordId, discordName, guildId, roleId, matchedEmailHash) {
   const idHashes = await dualHashSensitive(env, 'discord_id', discordId);
   const nameV2 = await hmacSensitive(env, 'discord_name', discordName || '');
   if (!idHashes.v2) return;
@@ -1369,15 +1370,16 @@ async function cacheDiscordVerification(env, discordId, discordName, guildId, ro
   await execRun(
     env,
     `
-      INSERT INTO discord_verified_identities (discord_id, discord_name, guild_id, role_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+      INSERT INTO discord_verified_identities (discord_id, discord_name, guild_id, role_id, matched_email_hash, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
       ON CONFLICT(discord_id) DO UPDATE SET
         discord_name = excluded.discord_name,
         guild_id = excluded.guild_id,
         role_id = excluded.role_id,
+        matched_email_hash = excluded.matched_email_hash,
         updated_at = datetime('now')
     `,
-    [idHashes.v2, nameV2, guildId, roleId]
+    [idHashes.v2, nameV2, guildId, roleId, matchedEmailHash || null]
   );
 }
 
@@ -1416,7 +1418,7 @@ function buildOAuthRedirectUrl(env, provider) {
       client_id: env.DISCORD_CLIENT_ID,
       redirect_uri: env.DISCORD_REDIRECT_URI,
       response_type: 'code',
-      scope: 'identify',
+      scope: 'identify email',
     });
     return `https://discord.com/api/oauth2/authorize?${params}`;
   }
@@ -1506,7 +1508,7 @@ async function fetchGithubUserEmails(accessToken) {
   return Array.isArray(emails) ? emails : [];
 }
 
-/** Returns the allowed domain if any verified GitHub email's domain matches ALLOWED_EMAIL_DOMAIN; else null. */
+/** Returns { domain, email } when a verified GitHub email's domain matches ALLOWED_EMAIL_DOMAIN; else null. */
 async function resolveGithubAllowedDomain(env, accessToken) {
   const allowedDomain = String(env.ALLOWED_EMAIL_DOMAIN || '').trim().toLowerCase();
   if (!allowedDomain) {
@@ -1520,7 +1522,7 @@ async function resolveGithubAllowedDomain(env, accessToken) {
     if (!normalized) continue;
     const domain = getEmailDomain(normalized);
     if (domain === allowedDomain) {
-      return allowedDomain;
+      return { domain: allowedDomain, email: normalized };
     }
   }
   return null;
@@ -1533,7 +1535,7 @@ async function getCachedGithubVerification(env, plainGithubId) {
   const row = await queryFirst(
     env,
     `
-      SELECT github_id, github_login, matched_email_domain
+      SELECT github_id, github_login, matched_email_domain, matched_email_hash
       FROM github_verified_identities
       WHERE github_id IN (?, ?)
       LIMIT 1
@@ -1548,14 +1550,15 @@ async function getCachedGithubVerification(env, plainGithubId) {
       await execRun(
         env,
         `
-          INSERT INTO github_verified_identities (github_id, github_login, matched_email_domain, created_at, updated_at)
-          VALUES (?, ?, ?, datetime('now'), datetime('now'))
+          INSERT INTO github_verified_identities (github_id, github_login, matched_email_domain, matched_email_hash, created_at, updated_at)
+          VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
           ON CONFLICT(github_id) DO UPDATE SET
             github_login = excluded.github_login,
             matched_email_domain = excluded.matched_email_domain,
+            matched_email_hash = excluded.matched_email_hash,
             updated_at = datetime('now')
         `,
-        [v2, row.github_login, row.matched_email_domain]
+        [v2, row.github_login, row.matched_email_domain, row.matched_email_hash]
       );
       row.github_id = v2;
     } catch (error) {
@@ -1565,7 +1568,7 @@ async function getCachedGithubVerification(env, plainGithubId) {
   return row;
 }
 
-async function cacheGithubVerification(env, githubId, githubLogin, matchedDomain) {
+async function cacheGithubVerification(env, githubId, githubLogin, matchedDomain, matchedEmailHash) {
   const idHashes = await dualHashSensitive(env, 'github_id', githubId);
   const loginV2 = await hmacSensitive(env, 'github_login', githubLogin || '');
   if (!idHashes.v2) return;
@@ -1577,14 +1580,15 @@ async function cacheGithubVerification(env, githubId, githubLogin, matchedDomain
   await execRun(
     env,
     `
-      INSERT INTO github_verified_identities (github_id, github_login, matched_email_domain, created_at, updated_at)
-      VALUES (?, ?, ?, datetime('now'), datetime('now'))
+      INSERT INTO github_verified_identities (github_id, github_login, matched_email_domain, matched_email_hash, created_at, updated_at)
+      VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
       ON CONFLICT(github_id) DO UPDATE SET
         github_login = excluded.github_login,
         matched_email_domain = excluded.matched_email_domain,
+        matched_email_hash = excluded.matched_email_hash,
         updated_at = datetime('now')
     `,
-    [idHashes.v2, loginV2, matchedDomain]
+    [idHashes.v2, loginV2, matchedDomain, matchedEmailHash || null]
   );
 }
 
@@ -1707,11 +1711,50 @@ function userToAdminShape(user) {
   };
 }
 
+// Returns true when the user has at least one strong 2FA method active
+// (confirmed TOTP or a registered passkey). Recovery codes alone do NOT
+// satisfy this gate — they're a fallback, not a primary 2FA method.
+async function userHasStrongTwoFactor(env, userId) {
+  if (!userId) return false;
+  try {
+    const totp = await queryFirst(
+      env,
+      'SELECT 1 AS present FROM user_totp_credentials WHERE user_id = ? AND confirmed_at IS NOT NULL LIMIT 1',
+      [userId]
+    );
+    if (totp) return true;
+    const passkey = await queryFirst(
+      env,
+      'SELECT 1 AS present FROM user_passkey_credentials WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    return Boolean(passkey);
+  } catch (error) {
+    logServerError('require_role_2fa_check', error);
+    return false;
+  }
+}
+
 async function requireRole(request, env, minRole) {
   const auth = await requireUserAuth(request, env);
   if (auth.response) return auth;
   if (!rolesAtLeast(auth.user.role, minRole)) {
     return { response: jsonResponse({ success: false, message: 'Forbidden' }, 403) };
+  }
+  // Every privileged role (moderator/admin/super_admin) must have at least one
+  // strong 2FA method enrolled. This mirrors the AdminPanel UI gate so the
+  // management API is unreachable without TOTP or a passkey on file.
+  if (!(await userHasStrongTwoFactor(env, auth.user.id))) {
+    return {
+      response: jsonResponse(
+        {
+          success: false,
+          message: 'Two-factor authentication is required for management access. Set up TOTP or a passkey in your User Center.',
+          two_factor_setup_required: true,
+        },
+        403
+      ),
+    };
   }
   return { user: auth.user, admin: userToAdminShape(auth.user) };
 }
@@ -2323,11 +2366,59 @@ async function handleRequest(request, env, ctx) {
         return jsonResponse({ success: false, message: 'This name is already linked to another account.' }, 400);
       }
       const existingByEmail = emailHashes.v2
-        ? await queryFirst(env, 'SELECT wechat_id, email FROM accounts WHERE wechat_id != ? AND email IN (?, ?) LIMIT 1', [wechat_id, emailHashes.v1, emailHashes.v2])
+        ? await queryFirst(env, 'SELECT wechat_id, email, verification_method FROM accounts WHERE wechat_id != ? AND email IN (?, ?) AND verified_status = 1 LIMIT 1', [wechat_id, emailHashes.v1, emailHashes.v2])
         : null;
       if (existingByEmail) {
         if (existingByEmail.email === emailHashes.v1) {
           await lazyUpgradeAccountColumn(env, 'email', existingByEmail.wechat_id, emailHashes.v2);
+        }
+        const existingMethod = String(existingByEmail.verification_method || '');
+        // Auto-connect into existing Email/GitHub/Discord-verified account: ADFS
+        // proves ownership of the email, so reverify into that account,
+        // enriching it with the ADFS-provided student_id/student_name and
+        // stamping reverified_at. Preserves the original verification_method.
+        // ADFS-original is intentionally NOT whitelisted here: same-person ADFS
+        // re-verification is identified by student_id (handled by the
+        // existingByStudentId/StudentName checks above and the preview-driven
+        // auto-fill), so a cross-account email match with a different ADFS row
+        // implies a different student and should be rejected.
+        // Manual/Batch are excluded because they require explicit admin handling.
+        if (
+          existingMethod === 'Email' ||
+          existingMethod === 'GitHub' ||
+          existingMethod === 'Discord'
+        ) {
+          const targetWechatId = existingByEmail.wechat_id;
+          const blacklistResponseForTarget = await ensureNotBlacklisted(env, targetWechatId);
+          if (blacklistResponseForTarget) {
+            return blacklistResponseForTarget;
+          }
+          await execRun(
+            env,
+            "UPDATE accounts SET reverified_at = datetime('now'), student_id = ?, student_name = ?, email = ? WHERE wechat_id = ?",
+            [studentIdHashes.v2, studentNameHashes.v2, emailHashes.v2, targetWechatId]
+          );
+          const bind = await issueBindToken(env, targetWechatId, 'ADFS');
+          const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, targetWechatId);
+          const reverifiedAt = new Date().toISOString();
+          const reverifyBody = `Account reverified at ${reverifiedAt} via ADFS (previously verified via ${existingMethod}).`;
+          await execRun(
+            env,
+            `
+              INSERT INTO account_info (wechat_id, color, icon, title, body, creator, visibility)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+            `,
+            [targetWechatId, 'emerald', 'refresh', 'Account reverified', reverifyBody, 'SYSTEM', 'private']
+          );
+          return jsonResponse({
+            success: true,
+            message: 'Account reverified successfully.',
+            reverified: true,
+            wechat_id: targetWechatId,
+            bind_token: bind.token,
+            bind_token_expires_at: bind.expiresAt,
+            already_linked_to_rowo: alreadyLinkedToRowo,
+          });
         }
         return jsonResponse({ success: false, message: 'This email is already linked to another account.' }, 400);
       }
@@ -2392,37 +2483,10 @@ async function handleRequest(request, env, ctx) {
         if (await checkVerified(env, wechat_id)) {
           return jsonResponse({ success: false, message: 'Account is already verified.' }, 400);
         }
-        let emailHashes;
-        try {
-          emailHashes = await dualHashSensitive(env, 'email', normalizedEmail);
-        } catch (error) {
-          return genericError('verify_email_hash', error, 500, 'Server configuration error.');
-        }
-        const emailUsedByOtherWechat = await queryFirst(
-          env,
-          `
-            SELECT wechat_id, email
-            FROM accounts
-            WHERE email IN (?, ?)
-              AND verification_method = 'Email'
-              AND wechat_id <> ?
-            LIMIT 1
-          `,
-          [emailHashes.v1, emailHashes.v2, wechat_id]
-        );
-
-        if (emailUsedByOtherWechat) {
-          if (emailUsedByOtherWechat.email === emailHashes.v1) {
-            await lazyUpgradeAccountColumn(env, 'email', emailUsedByOtherWechat.wechat_id, emailHashes.v2);
-          }
-          return jsonResponse(
-            {
-              success: false,
-              message: 'This email has already been used to verify another WeChat ID.',
-            },
-            409
-          );
-        }
+        // Note: we no longer reject when the email is linked to another verified
+        // WeChat ID. Owning the inbox is the proof of identity — if the email
+        // matches an existing account, the code-submission path below will
+        // auto-connect the verifier to that account.
 
         const recentSend = await queryFirst(
           env,
@@ -2526,6 +2590,71 @@ async function handleRequest(request, env, ctx) {
         return jsonResponse({ success: false, message: 'Invalid verification code.' }, 400);
       }
 
+      // Owning the inbox is the proof of identity. If a verified account
+      // already exists for this email under a different WeChat ID (any
+      // method), auto-connect to that existing account.
+      let verifiedEmailHashes;
+      try {
+        verifiedEmailHashes = await dualHashSensitive(env, 'email', normalizedEmail);
+      } catch (error) {
+        return genericError('verify_email_lookup_hash', error, 500, 'Server configuration error.');
+      }
+      const crossAccountByEmail = verifiedEmailHashes && (verifiedEmailHashes.v1 || verifiedEmailHashes.v2)
+        ? await queryFirst(
+            env,
+            `SELECT wechat_id, verification_method, email FROM accounts
+              WHERE email IN (?, ?) AND verified_status = 1 AND wechat_id <> ?
+              LIMIT 1`,
+            [verifiedEmailHashes.v1, verifiedEmailHashes.v2, wechat_id]
+          )
+        : null;
+
+      if (crossAccountByEmail) {
+        const existingMethod = String(crossAccountByEmail.verification_method || '');
+        if (existingMethod === 'Manual' || existingMethod === 'Batch') {
+          await execRun(env, 'DELETE FROM email_verification_codes WHERE wechat_id = ? AND email = ?', [wechat_id, normalizedEmail]);
+          return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
+        }
+        const targetWechatId = crossAccountByEmail.wechat_id;
+        if (crossAccountByEmail.email === verifiedEmailHashes.v1 && verifiedEmailHashes.v2) {
+          await lazyUpgradeAccountColumn(env, 'email', targetWechatId, verifiedEmailHashes.v2);
+        }
+        const blacklistResponseForTarget = await ensureNotBlacklisted(env, targetWechatId);
+        if (blacklistResponseForTarget) {
+          await execRun(env, 'DELETE FROM email_verification_codes WHERE wechat_id = ? AND email = ?', [wechat_id, normalizedEmail]);
+          return blacklistResponseForTarget;
+        }
+        await execRun(
+          env,
+          "UPDATE accounts SET reverified_at = datetime('now'), email = ? WHERE wechat_id = ?",
+          [verifiedEmailHashes.v2, targetWechatId]
+        );
+        const bind = await issueBindToken(env, targetWechatId, 'Email');
+        const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, targetWechatId);
+        const reverifiedAt = new Date().toISOString();
+        const reverifyBody = existingMethod === 'Email'
+          ? `Account reverified at ${reverifiedAt}.`
+          : `Account reverified at ${reverifiedAt} via Email (previously verified via ${existingMethod}).`;
+        await execRun(
+          env,
+          `
+            INSERT INTO account_info (wechat_id, color, icon, title, body, creator, visibility)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `,
+          [targetWechatId, 'emerald', 'refresh', 'Account reverified', reverifyBody, 'SYSTEM', 'private']
+        );
+        await execRun(env, 'DELETE FROM email_verification_codes WHERE wechat_id = ? AND email = ?', [wechat_id, normalizedEmail]);
+        return jsonResponse({
+          success: true,
+          message: 'Account reverified successfully.',
+          reverified: true,
+          wechat_id: targetWechatId,
+          bind_token: bind.token,
+          bind_token_expires_at: bind.expiresAt,
+          already_linked_to_rowo: alreadyLinkedToRowo,
+        });
+      }
+
       const existingAccountEmail = await queryFirst(
         env,
         'SELECT verified_status, verification_method FROM accounts WHERE wechat_id = ?',
@@ -2537,21 +2666,11 @@ async function handleRequest(request, env, ctx) {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
         if (method === 'Email') {
-          const reverifyEmailDual = await dualHashSensitive(env, 'email', normalizedEmail);
-          const reverifyEmailConflict = reverifyEmailDual.v2
-            ? await queryFirst(env, 'SELECT wechat_id, email FROM accounts WHERE wechat_id != ? AND email IN (?, ?) LIMIT 1', [wechat_id, reverifyEmailDual.v1, reverifyEmailDual.v2])
-            : null;
-          if (reverifyEmailConflict) {
-            if (reverifyEmailConflict.email === reverifyEmailDual.v1) {
-              await lazyUpgradeAccountColumn(env, 'email', reverifyEmailConflict.wechat_id, reverifyEmailDual.v2);
-            }
-            await execRun(env, 'DELETE FROM email_verification_codes WHERE wechat_id = ? AND email = ?', [wechat_id, normalizedEmail]);
-            return jsonResponse({ success: false, message: 'This email is already linked to another account.' }, 409);
-          }
+          // Email already proven to be free of cross-account conflicts above; safe to update.
           await execRun(
             env,
             "UPDATE accounts SET reverified_at = datetime('now'), email = ? WHERE wechat_id = ?",
-            [reverifyEmailDual.v2, wechat_id]
+            [verifiedEmailHashes.v2, wechat_id]
           );
           const bind = await issueBindToken(env, wechat_id, 'Email');
           const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
@@ -2637,6 +2756,10 @@ async function handleRequest(request, env, ctx) {
         discordIdentity?.global_name || discordIdentity?.username || discordIdentity?.id || ''
       ).trim();
       const userAvatar = String(discordIdentity?.avatar || '').trim();
+      // Discord only includes `email` when the `email` scope was granted AND the
+      // user has a verified email on their account.
+      const discordEmailVerified = discordIdentity?.verified === true;
+      const normalizedDiscordEmail = discordEmailVerified ? normalizeEmail(discordIdentity?.email || '') : '';
 
       if (!discordId) {
         return jsonResponse({ success: false, message: 'Discord identity not found.' }, 400);
@@ -2650,6 +2773,30 @@ async function handleRequest(request, env, ctx) {
         logServerError('discord_existing_wechat_lookup', error);
       }
 
+      // Cross-check the Discord-verified email against accounts.email (both v1
+      // and v2 hashes) so we can auto-connect to an existing account verified
+      // by another method.
+      const resolveEmailMatch = async (emailHashEncoded) => {
+        const decoded = decodeDualHash(emailHashEncoded);
+        const candidates = [decoded.v1, decoded.v2].filter((h) => h != null && h !== '');
+        if (candidates.length === 0) return null;
+        const placeholders = candidates.map(() => '?').join(', ');
+        try {
+          const row = await queryFirst(
+            env,
+            `SELECT wechat_id, verification_method, email FROM accounts WHERE email IN (${placeholders}) AND verified_status = 1 LIMIT 1`,
+            candidates
+          );
+          if (row && decoded.v2 && row.email === decoded.v1) {
+            await lazyUpgradeAccountColumn(env, 'email', row.wechat_id, decoded.v2);
+          }
+          return row || null;
+        } catch (error) {
+          logServerError('discord_email_cross_check', error);
+          return null;
+        }
+      };
+
       let cachedVerification;
       try {
         cachedVerification = await getCachedDiscordVerification(env, discordId);
@@ -2657,13 +2804,19 @@ async function handleRequest(request, env, ctx) {
         return genericError('discord_cache_lookup', error, 500, 'Server configuration error.');
       }
       if (cachedVerification) {
+        let emailMatch = null;
+        if (!existingWechatIdForDiscord) {
+          emailMatch = await resolveEmailMatch(cachedVerification.matched_email_hash);
+        }
         return jsonResponse({
           success: true,
           discord_id: discordId,
           discord_name: discordName,
           avatar: userAvatar,
           cached: true,
-          existing_wechat_id: existingWechatIdForDiscord,
+          existing_wechat_id: existingWechatIdForDiscord || (emailMatch ? emailMatch.wechat_id : null),
+          matched_via_email: Boolean(!existingWechatIdForDiscord && emailMatch),
+          previous_verification_method: emailMatch ? emailMatch.verification_method : null,
         });
       }
 
@@ -2684,16 +2837,32 @@ async function handleRequest(request, env, ctx) {
         );
       }
 
+      let matchedEmailHashEncoded = null;
+      if (normalizedDiscordEmail) {
+        try {
+          const emailHashes = await dualHashSensitive(env, 'email', normalizedDiscordEmail);
+          matchedEmailHashEncoded = encodeDualHash(emailHashes);
+        } catch (error) {
+          return genericError('discord_email_hash', error, 500, 'Server configuration error.');
+        }
+      }
+
       try {
         await cacheDiscordVerification(
           env,
           discordId,
           discordName,
           trustedMembership.guildId,
-          trustedMembership.roleId
+          trustedMembership.roleId,
+          matchedEmailHashEncoded
         );
       } catch (error) {
         return genericError('discord_cache_store', error, 500, 'Server configuration error.');
+      }
+
+      let emailMatch = null;
+      if (!existingWechatIdForDiscord) {
+        emailMatch = await resolveEmailMatch(matchedEmailHashEncoded);
       }
 
       return jsonResponse({
@@ -2702,7 +2871,9 @@ async function handleRequest(request, env, ctx) {
         discord_name: discordName,
         avatar: userAvatar,
         cached: false,
-        existing_wechat_id: existingWechatIdForDiscord,
+        existing_wechat_id: existingWechatIdForDiscord || (emailMatch ? emailMatch.wechat_id : null),
+        matched_via_email: Boolean(!existingWechatIdForDiscord && emailMatch),
+        previous_verification_method: emailMatch ? emailMatch.verification_method : null,
       });
     }
 
@@ -2737,6 +2908,12 @@ async function handleRequest(request, env, ctx) {
         );
       }
 
+      const matchedEmailHashes = decodeDualHash(verifiedDiscord.matched_email_hash);
+      const matchedEmailHashV2 = matchedEmailHashes.v2 || null;
+      const matchedEmailCandidates = [matchedEmailHashes.v1, matchedEmailHashes.v2].filter(
+        (h) => h != null && h !== ''
+      );
+
       const connectedElsewhere = await queryFirst(
         env,
         `
@@ -2761,18 +2938,47 @@ async function handleRequest(request, env, ctx) {
         );
       }
 
+      // Block writing the email onto this account if another verified account already owns the hash
+      // (under either the legacy v1 or current v2 hash format).
+      const emailUsedByOtherWechat = matchedEmailCandidates.length
+        ? await queryFirst(
+            env,
+            `SELECT wechat_id, email FROM accounts WHERE wechat_id != ? AND email IN (${matchedEmailCandidates.map(() => '?').join(', ')}) AND verified_status = 1 LIMIT 1`,
+            [wechat_id, ...matchedEmailCandidates]
+          )
+        : null;
+      if (emailUsedByOtherWechat) {
+        if (matchedEmailHashV2 && emailUsedByOtherWechat.email === matchedEmailHashes.v1) {
+          await lazyUpgradeAccountColumn(env, 'email', emailUsedByOtherWechat.wechat_id, matchedEmailHashV2);
+        }
+        return jsonResponse(
+          {
+            success: false,
+            message: 'This email is already linked to another WeChat ID.',
+          },
+          409
+        );
+      }
+
       const existingAccountDiscord = await queryFirst(
         env,
-        'SELECT verified_status, verification_method FROM accounts WHERE wechat_id = ?',
+        'SELECT verified_status, verification_method, email FROM accounts WHERE wechat_id = ?',
         [wechat_id]
       );
 
       if (existingAccountDiscord && Number(existingAccountDiscord.verified_status) === 1) {
         const method = String(existingAccountDiscord.verification_method || '');
+        const existingEmailHash = existingAccountDiscord.email ? String(existingAccountDiscord.email) : '';
+        const emailHashMatches = Boolean(
+          existingEmailHash &&
+            matchedEmailCandidates.includes(existingEmailHash)
+        );
         if (method === 'Manual' || method === 'Batch') {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
-        if (method === 'Discord') {
+        // Allow re-verify when the existing method is Discord OR when the Discord-verified
+        // email matches the email already on file (cross-method re-verify).
+        if (method === 'Discord' || emailHashMatches) {
           const reverifyDiscordConflict = discordIdHashes.v2
             ? await queryFirst(env, 'SELECT wechat_id, discord_id FROM accounts WHERE wechat_id != ? AND discord_id IN (?, ?) AND verified_status = 1 LIMIT 1', [wechat_id, discordIdHashes.v1, discordIdHashes.v2])
             : null;
@@ -2782,21 +2988,32 @@ async function handleRequest(request, env, ctx) {
             }
             return jsonResponse({ success: false, message: 'This Discord account is already connected to another WeChat ID.' }, 409);
           }
-          await execRun(
-            env,
-            "UPDATE accounts SET reverified_at = datetime('now'), discord_id = ? WHERE wechat_id = ?",
-            [discordIdHashes.v2, wechat_id]
-          );
+          if (matchedEmailHashV2) {
+            await execRun(
+              env,
+              "UPDATE accounts SET reverified_at = datetime('now'), discord_id = ?, email = ? WHERE wechat_id = ?",
+              [discordIdHashes.v2, matchedEmailHashV2, wechat_id]
+            );
+          } else {
+            await execRun(
+              env,
+              "UPDATE accounts SET reverified_at = datetime('now'), discord_id = ? WHERE wechat_id = ?",
+              [discordIdHashes.v2, wechat_id]
+            );
+          }
           const bind = await issueBindToken(env, wechat_id, 'Discord');
           const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
+          const reverifyBody = method === 'Discord'
+            ? `Account reverified at ${reverifiedAt}.`
+            : `Account reverified at ${reverifiedAt} via Discord (previously verified via ${method}).`;
           await execRun(
             env,
             `
               INSERT INTO account_info (wechat_id, color, icon, title, body, creator, visibility)
               VALUES (?, ?, ?, ?, ?, ?, ?)
             `,
-            [wechat_id, 'blue', 'refresh', 'Account reverified', `Account reverified at ${reverifiedAt}.`, 'SYSTEM', 'private']
+            [wechat_id, 'blue', 'refresh', 'Account reverified', reverifyBody, 'SYSTEM', 'private']
           );
           return jsonResponse({
             success: true,
@@ -2814,15 +3031,16 @@ async function handleRequest(request, env, ctx) {
       await execRun(
         env,
         `
-          INSERT INTO accounts (wechat_id, verified_status, verification_method, verification_time, discord_id)
-          VALUES (?, 1, 'Discord', datetime('now'), ?)
+          INSERT INTO accounts (wechat_id, verified_status, verification_method, verification_time, discord_id, email)
+          VALUES (?, 1, 'Discord', datetime('now'), ?, ?)
           ON CONFLICT(wechat_id) DO UPDATE SET
             verified_status = 1,
             verification_method = 'Discord',
             verification_time = datetime('now'),
-            discord_id = excluded.discord_id
+            discord_id = excluded.discord_id,
+            email = excluded.email
         `,
-        [wechat_id, discordIdHashes.v2]
+        [wechat_id, discordIdHashes.v2, matchedEmailHashV2]
       );
 
       const bind = await issueBindToken(env, wechat_id, 'Discord');
@@ -2876,6 +3094,32 @@ async function handleRequest(request, env, ctx) {
         logServerError('github_existing_wechat_lookup', error);
       }
 
+      // If the GitHub-verified email matches an existing account's hashed email
+      // (e.g. previously verified via ADFS), surface that account so the user
+      // can re-verify with GitHub instead of creating a parallel record.
+      // Accepts the dual-hash encoded value so we match both v1 (legacy sha256)
+      // and v2 (HMAC) email hashes during the migration window.
+      const resolveEmailMatch = async (emailHashEncoded) => {
+        const decoded = decodeDualHash(emailHashEncoded);
+        const candidates = [decoded.v1, decoded.v2].filter((h) => h != null && h !== '');
+        if (candidates.length === 0) return null;
+        const placeholders = candidates.map(() => '?').join(', ');
+        try {
+          const row = await queryFirst(
+            env,
+            `SELECT wechat_id, verification_method, email FROM accounts WHERE email IN (${placeholders}) AND verified_status = 1 LIMIT 1`,
+            candidates
+          );
+          if (row && decoded.v2 && row.email === decoded.v1) {
+            await lazyUpgradeAccountColumn(env, 'email', row.wechat_id, decoded.v2);
+          }
+          return row || null;
+        } catch (error) {
+          logServerError('github_email_cross_check', error);
+          return null;
+        }
+      };
+
       let cachedVerification;
       try {
         cachedVerification = await getCachedGithubVerification(env, githubId);
@@ -2883,6 +3127,10 @@ async function handleRequest(request, env, ctx) {
         return genericError('github_cache_lookup', error, 500, 'Server configuration error.');
       }
       if (cachedVerification) {
+        let emailMatch = null;
+        if (!existingWechatIdForGithub) {
+          emailMatch = await resolveEmailMatch(cachedVerification.matched_email_hash);
+        }
         return jsonResponse({
           success: true,
           github_id: githubId,
@@ -2890,18 +3138,20 @@ async function handleRequest(request, env, ctx) {
           avatar: userAvatar,
           matched_email_domain: cachedVerification.matched_email_domain,
           cached: true,
-          existing_wechat_id: existingWechatIdForGithub,
+          existing_wechat_id: existingWechatIdForGithub || (emailMatch ? emailMatch.wechat_id : null),
+          matched_via_email: Boolean(!existingWechatIdForGithub && emailMatch),
+          previous_verification_method: emailMatch ? emailMatch.verification_method : null,
         });
       }
 
-      let matchedDomain;
+      let matchedDomainResult;
       try {
-        matchedDomain = await resolveGithubAllowedDomain(env, accessToken);
+        matchedDomainResult = await resolveGithubAllowedDomain(env, accessToken);
       } catch (error) {
         return genericError('github_email_check', error, 500, 'Failed to validate GitHub email domain.');
       }
 
-      if (!matchedDomain) {
+      if (!matchedDomainResult) {
         return jsonResponse(
           {
             success: false,
@@ -2911,10 +3161,25 @@ async function handleRequest(request, env, ctx) {
         );
       }
 
+      const matchedDomain = matchedDomainResult.domain;
+      const matchedEmail = matchedDomainResult.email;
+      let matchedEmailHashEncoded = null;
       try {
-        await cacheGithubVerification(env, githubId, githubLogin, matchedDomain);
+        const emailHashes = await dualHashSensitive(env, 'email', matchedEmail);
+        matchedEmailHashEncoded = encodeDualHash(emailHashes);
+      } catch (error) {
+        return genericError('github_email_hash', error, 500, 'Server configuration error.');
+      }
+
+      try {
+        await cacheGithubVerification(env, githubId, githubLogin, matchedDomain, matchedEmailHashEncoded);
       } catch (error) {
         return genericError('github_cache_store', error, 500, 'Server configuration error.');
+      }
+
+      let emailMatch = null;
+      if (!existingWechatIdForGithub) {
+        emailMatch = await resolveEmailMatch(matchedEmailHashEncoded);
       }
 
       return jsonResponse({
@@ -2924,7 +3189,9 @@ async function handleRequest(request, env, ctx) {
         avatar: userAvatar,
         matched_email_domain: matchedDomain,
         cached: false,
-        existing_wechat_id: existingWechatIdForGithub,
+        existing_wechat_id: existingWechatIdForGithub || (emailMatch ? emailMatch.wechat_id : null),
+        matched_via_email: Boolean(!existingWechatIdForGithub && emailMatch),
+        previous_verification_method: emailMatch ? emailMatch.verification_method : null,
       });
     }
 
@@ -2959,6 +3226,12 @@ async function handleRequest(request, env, ctx) {
         );
       }
 
+      const matchedEmailHashes = decodeDualHash(verifiedGithub.matched_email_hash);
+      const matchedEmailHashV2 = matchedEmailHashes.v2 || null;
+      const matchedEmailCandidates = [matchedEmailHashes.v1, matchedEmailHashes.v2].filter(
+        (h) => h != null && h !== ''
+      );
+
       const connectedElsewhere = await queryFirst(
         env,
         `
@@ -2983,18 +3256,47 @@ async function handleRequest(request, env, ctx) {
         );
       }
 
+      // Block writing the email onto this account if another verified account already owns the hash
+      // (under either the legacy v1 or current v2 hash format).
+      const emailUsedByOtherWechat = matchedEmailCandidates.length
+        ? await queryFirst(
+            env,
+            `SELECT wechat_id, email FROM accounts WHERE wechat_id != ? AND email IN (${matchedEmailCandidates.map(() => '?').join(', ')}) AND verified_status = 1 LIMIT 1`,
+            [wechat_id, ...matchedEmailCandidates]
+          )
+        : null;
+      if (emailUsedByOtherWechat) {
+        if (matchedEmailHashV2 && emailUsedByOtherWechat.email === matchedEmailHashes.v1) {
+          await lazyUpgradeAccountColumn(env, 'email', emailUsedByOtherWechat.wechat_id, matchedEmailHashV2);
+        }
+        return jsonResponse(
+          {
+            success: false,
+            message: 'This email is already linked to another WeChat ID.',
+          },
+          409
+        );
+      }
+
       const existingAccountGithub = await queryFirst(
         env,
-        'SELECT verified_status, verification_method FROM accounts WHERE wechat_id = ?',
+        'SELECT verified_status, verification_method, email FROM accounts WHERE wechat_id = ?',
         [wechat_id]
       );
 
       if (existingAccountGithub && Number(existingAccountGithub.verified_status) === 1) {
         const method = String(existingAccountGithub.verification_method || '');
+        const existingEmailHash = existingAccountGithub.email ? String(existingAccountGithub.email) : '';
+        const emailHashMatches = Boolean(
+          existingEmailHash &&
+            matchedEmailCandidates.includes(existingEmailHash)
+        );
         if (method === 'Manual' || method === 'Batch') {
           return jsonResponse({ success: false, message: 'Account is already verified. Reverification is not available for this account.' }, 400);
         }
-        if (method === 'GitHub') {
+        // Allow re-verify when the existing method is GitHub OR when the GitHub-verified
+        // email matches the email already on file (proves identity for cross-method re-verify).
+        if (method === 'GitHub' || emailHashMatches) {
           const reverifyGithubConflict = githubIdHashes.v2
             ? await queryFirst(env, 'SELECT wechat_id, github_id FROM accounts WHERE wechat_id != ? AND github_id IN (?, ?) AND verified_status = 1 LIMIT 1', [wechat_id, githubIdHashes.v1, githubIdHashes.v2])
             : null;
@@ -3004,21 +3306,32 @@ async function handleRequest(request, env, ctx) {
             }
             return jsonResponse({ success: false, message: 'This GitHub account is already connected to another WeChat ID.' }, 409);
           }
-          await execRun(
-            env,
-            "UPDATE accounts SET reverified_at = datetime('now'), github_id = ? WHERE wechat_id = ?",
-            [githubIdHashes.v2, wechat_id]
-          );
+          if (matchedEmailHashV2) {
+            await execRun(
+              env,
+              "UPDATE accounts SET reverified_at = datetime('now'), github_id = ?, email = ? WHERE wechat_id = ?",
+              [githubIdHashes.v2, matchedEmailHashV2, wechat_id]
+            );
+          } else {
+            await execRun(
+              env,
+              "UPDATE accounts SET reverified_at = datetime('now'), github_id = ? WHERE wechat_id = ?",
+              [githubIdHashes.v2, wechat_id]
+            );
+          }
           const bind = await issueBindToken(env, wechat_id, 'GitHub');
           const alreadyLinkedToRowo = await isWechatIdLinkedToRowoAccount(env, wechat_id);
           const reverifiedAt = new Date().toISOString();
+          const reverifyBody = method === 'GitHub'
+            ? `Account reverified at ${reverifiedAt}.`
+            : `Account reverified at ${reverifiedAt} via GitHub (previously verified via ${method}).`;
           await execRun(
             env,
             `
               INSERT INTO account_info (wechat_id, color, icon, title, body, creator, visibility)
               VALUES (?, ?, ?, ?, ?, ?, ?)
             `,
-            [wechat_id, 'slate', 'refresh', 'Account reverified', `Account reverified at ${reverifiedAt}.`, 'SYSTEM', 'private']
+            [wechat_id, 'slate', 'refresh', 'Account reverified', reverifyBody, 'SYSTEM', 'private']
           );
           return jsonResponse({
             success: true,
@@ -3036,15 +3349,16 @@ async function handleRequest(request, env, ctx) {
       await execRun(
         env,
         `
-          INSERT INTO accounts (wechat_id, verified_status, verification_method, verification_time, github_id)
-          VALUES (?, 1, 'GitHub', datetime('now'), ?)
+          INSERT INTO accounts (wechat_id, verified_status, verification_method, verification_time, github_id, email)
+          VALUES (?, 1, 'GitHub', datetime('now'), ?, ?)
           ON CONFLICT(wechat_id) DO UPDATE SET
             verified_status = 1,
             verification_method = 'GitHub',
             verification_time = datetime('now'),
-            github_id = excluded.github_id
+            github_id = excluded.github_id,
+            email = excluded.email
         `,
-        [wechat_id, githubIdHashes.v2]
+        [wechat_id, githubIdHashes.v2, matchedEmailHashV2]
       );
 
       const bind = await issueBindToken(env, wechat_id, 'GitHub');
@@ -4023,13 +4337,9 @@ async function handleRequest(request, env, ctx) {
       if (auth.response) return auth.response;
 
       const { page, pageSize, like } = parsePaginationParams(url);
-      const isModerator = auth.admin.role === 'moderator';
 
       const where = [];
       const params = [];
-      if (isModerator) {
-        where.push("manual_status = 'pending'");
-      }
       if (like) {
         where.push(
           "(LOWER(wechat_id) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(student_name, '')) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(student_id, '')) LIKE ? ESCAPE '\\')"
@@ -4045,9 +4355,7 @@ async function handleRequest(request, env, ctx) {
       );
       const total = Number(countRow?.c ?? 0);
 
-      const orderBy = isModerator
-        ? 'ORDER BY verification_time DESC'
-        : "ORDER BY CASE WHEN manual_status = 'pending' THEN 0 ELSE 1 END, verification_time DESC";
+      const orderBy = "ORDER BY CASE WHEN manual_status = 'pending' THEN 0 ELSE 1 END, verification_time DESC";
 
       const accounts = await queryAll(
         env,
@@ -4506,7 +4814,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'GET' && pathname === '/api/admin/users') {
-      const auth = await requireRole(request, env, 'admin');
+      const auth = await requireRole(request, env, 'super_admin');
       if (auth.response) return auth.response;
 
       const { page, pageSize, like } = parsePaginationParams(url);
@@ -4561,7 +4869,7 @@ async function handleRequest(request, env, ctx) {
 
     const userResetMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/reset-password$/);
     if (method === 'POST' && userResetMatch) {
-      const auth = await requireRole(request, env, 'admin');
+      const auth = await requireRole(request, env, 'super_admin');
       if (auth.response) return auth.response;
       const id = decodeURIComponent(userResetMatch[1]);
       const body = await parseJson(request);
@@ -4597,7 +4905,7 @@ async function handleRequest(request, env, ctx) {
 
     const userUnbindMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/unbind-wechat$/);
     if (method === 'POST' && userUnbindMatch) {
-      const auth = await requireRole(request, env, 'admin');
+      const auth = await requireRole(request, env, 'super_admin');
       if (auth.response) return auth.response;
       const id = decodeURIComponent(userUnbindMatch[1]);
       const target = await queryFirst(env, 'SELECT id FROM user_accounts WHERE id = ?', [id]);
@@ -4695,6 +5003,12 @@ async function handleRequest(request, env, ctx) {
       if (q.length < 1) {
         return jsonResponse({ success: true, results: [] });
       }
+      // Restrict results to roles the caller is eligible to promote to a
+      // higher role: admins can only promote regular users (to moderator),
+      // super_admins can promote users (to moderator) or moderators (to admin).
+      const isSuper = auth.user.role === 'super_admin';
+      const promotableRoles = isSuper ? ['user', 'moderator'] : ['user'];
+      const rolePlaceholders = promotableRoles.map(() => '?').join(', ');
       const like = `%${q.replace(/[%_]/g, (m) => `\\${m}`)}%`;
       const rows = await queryAll(
         env,
@@ -4702,10 +5016,11 @@ async function handleRequest(request, env, ctx) {
           SELECT id, username_display, role, role_assigned_by
           FROM user_accounts
           WHERE LOWER(username_normalized) LIKE ? ESCAPE '\\'
+            AND role IN (${rolePlaceholders})
           ORDER BY username_normalized
           LIMIT 20
         `,
-        [like]
+        [like, ...promotableRoles]
       );
       return jsonResponse({
         success: true,

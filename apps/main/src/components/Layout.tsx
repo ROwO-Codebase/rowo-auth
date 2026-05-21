@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ShieldCheck, UserCheck, ShieldAlert, Info, HelpCircle, Github, LogIn, UserPlus, User as UserIcon, LogOut, ChevronDown } from 'lucide-react';
+import { ShieldCheck, UserCheck, Info, HelpCircle, Github, LogIn, UserPlus, User as UserIcon, LogOut, ChevronDown } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useSession } from '../contexts/SessionContext';
 
@@ -86,10 +86,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                         <Link
                           to="/admin"
                           onClick={() => setMenuOpen(false)}
-                          className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border-b border-slate-100"
+                          className="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 border-b border-slate-100"
                         >
-                          <ShieldAlert className="w-3.5 h-3.5" />
-                          Admin Panel
+                          Management Panel
                         </Link>
                       )}
                       <Link

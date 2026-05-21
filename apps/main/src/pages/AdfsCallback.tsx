@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
-import { XCircle, Loader2, ShieldCheck, RefreshCw } from 'lucide-react';
+import { XCircle, Loader2, ShieldCheck } from 'lucide-react';
 import PostVerifyPrompt from '../components/PostVerifyPrompt';
 
 const consumedAdfsPreviews = new Set<string>();
@@ -12,11 +12,46 @@ export default function AdfsCallback() {
   const [status, setStatus] = useState<'input_wechat' | 'verifying' | 'success' | 'error'>('input_wechat');
   const [message, setMessage] = useState('');
   const [wechatId, setWechatId] = useState('');
-  const [isReverify, setIsReverify] = useState(false);
   const [previewing, setPreviewing] = useState(true);
   const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean; alreadyLinkedToRowo: boolean } | null>(null);
 
   const code = searchParams.get('code');
+
+  const runVerify = async (wechat: string, codeValue: string) => {
+    setStatus('verifying');
+    setMessage('Verifying your student identity...');
+    try {
+      const res = await fetch(`${__API_ENDPOINT__}/api/verify/adfs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wechat_id: wechat, code: codeValue }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setStatus('success');
+        setMessage(data.message || 'Your WeChat account is now verified with ADFS!');
+        if (data.bind_token && data.wechat_id) {
+          setPostVerify({
+            bindToken: data.bind_token,
+            wechatId: data.wechat_id,
+            method: 'ADFS',
+            reverified: Boolean(data.reverified),
+            alreadyLinkedToRowo: Boolean(data.already_linked_to_rowo),
+          });
+        }
+      } else {
+        setStatus('error');
+        if (data.blacklisted && data.blacklist) {
+          setMessage(`Verification blocked: This account is blacklisted. Reason: ${data.blacklist.reason}`);
+        } else {
+          setMessage(data.message || 'Failed to verify student identity.');
+        }
+      }
+    } catch {
+      setStatus('error');
+      setMessage('An error occurred while communicating with the server.');
+    }
+  };
 
   useEffect(() => {
     if (!code) {
@@ -40,14 +75,17 @@ export default function AdfsCallback() {
         });
         const data = await res.json();
         if (data.success && data.existing_wechat_id) {
+          // Skip the re-verify confirmation screen and head straight to
+          // sign in / sign up via PostVerifyPrompt.
           setWechatId(data.existing_wechat_id);
-          setIsReverify(true);
+          setPreviewing(false);
+          await runVerify(data.existing_wechat_id, code);
+          return;
         }
       } catch {
         // Best-effort; fall back to manual input.
-      } finally {
-        setPreviewing(false);
       }
+      setPreviewing(false);
     };
     previewAdfs();
   }, [code]);
@@ -55,44 +93,7 @@ export default function AdfsCallback() {
   const handleVerify = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!wechatId.trim() || !code) return;
-
-    setStatus('verifying');
-    setMessage('Verifying your student identity...');
-
-    try {
-      const res = await fetch(`${__API_ENDPOINT__}/api/verify/adfs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          wechat_id: wechatId,
-          code: code,
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setStatus('success');
-        setMessage(data.message || 'Your WeChat account is now verified with ADFS!');
-        if (data.bind_token && data.wechat_id) {
-          setPostVerify({
-            bindToken: data.bind_token,
-            wechatId: data.wechat_id,
-            method: 'ADFS',
-            reverified: Boolean(data.reverified),
-            alreadyLinkedToRowo: Boolean(data.already_linked_to_rowo),
-          });
-        }
-      } else {
-        setStatus('error');
-        if (data.blacklisted && data.blacklist) {
-          setMessage(`Verification blocked: This account is blacklisted. Reason: ${data.blacklist.reason}`);
-        } else {
-          setMessage(data.message || 'Failed to verify student identity.');
-        }
-      }
-    } catch (error) {
-      setStatus('error');
-      setMessage('An error occurred while communicating with the server.');
-    }
+    await runVerify(wechatId, code);
   };
 
   if (postVerify) {
@@ -128,56 +129,31 @@ export default function AdfsCallback() {
             <p className="text-slate-500">{message}</p>
           </div>
         ) : status === 'input_wechat' ? (
-          isReverify ? (
-            <div className="flex flex-col items-center gap-6">
-              <div className="bg-emerald-100 p-4 rounded-2xl text-emerald-600">
-                <RefreshCw className="w-10 h-10" />
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold text-slate-900">Re-verify Existing Account</h2>
-                <p className="text-slate-500 mt-2">
-                  We found an existing verified account for your student identity.
-                </p>
-                <p className="mt-3 text-sm text-slate-600">
-                  WeChat ID: <span className="font-mono text-slate-900">{wechatId}</span>
-                </p>
-              </div>
-              <form onSubmit={handleVerify} className="w-full">
-                <button
-                  type="submit"
-                  className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl shadow-sm transition-colors"
-                >
-                  Continue Re-verification
-                </button>
-              </form>
+          <div className="flex flex-col items-center gap-6">
+            <div className="bg-indigo-100 p-4 rounded-2xl text-indigo-600">
+              <ShieldCheck className="w-10 h-10" />
             </div>
-          ) : (
-            <div className="flex flex-col items-center gap-6">
-              <div className="bg-indigo-100 p-4 rounded-2xl text-indigo-600">
-                <ShieldCheck className="w-10 h-10" />
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold text-slate-900">Link WeChat ID</h2>
-                <p className="text-slate-500 mt-2">ADFS Authentication successful! Now please enter your WeChat ID to complete the verification.</p>
-              </div>
-              <form onSubmit={handleVerify} className="w-full space-y-4">
-                <input
-                  type="text"
-                  value={wechatId}
-                  onChange={(e) => setWechatId(e.target.value)}
-                  placeholder="Enter your WeChat ID"
-                  required
-                  className="block w-full px-4 py-3 rounded-xl border border-slate-300 shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors"
-                />
-                <button
-                  type="submit"
-                  className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl shadow-sm transition-colors"
-                >
-                  Complete Verification
-                </button>
-              </form>
+            <div>
+              <h2 className="text-2xl font-bold text-slate-900">Link WeChat ID</h2>
+              <p className="text-slate-500 mt-2">ADFS Authentication successful! Now please enter your WeChat ID to complete the verification.</p>
             </div>
-          )
+            <form onSubmit={handleVerify} className="w-full space-y-4">
+              <input
+                type="text"
+                value={wechatId}
+                onChange={(e) => setWechatId(e.target.value)}
+                placeholder="Enter your WeChat ID"
+                required
+                className="block w-full px-4 py-3 rounded-xl border border-slate-300 shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors"
+              />
+              <button
+                type="submit"
+                className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl shadow-sm transition-colors"
+              >
+                Complete Verification
+              </button>
+            </form>
+          </div>
         ) : status === 'success' ? (
           <div className="flex flex-col items-center gap-4">
             <ShieldCheck className="w-16 h-16 text-emerald-500" />

@@ -85,7 +85,7 @@ interface AccountData {
 }
 
 export default function AdminPanel() {
-  const { user, loading: sessionLoading } = useSession();
+  const { user, twoFactor, loading: sessionLoading } = useSession();
   const [accounts, setAccounts] = useState<AccountData[]>([]);
   const [accountsTotal, setAccountsTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -111,7 +111,6 @@ export default function AdminPanel() {
 
   const role: RowoRole = (user?.role as RowoRole) || 'user';
   const isAtLeastAdmin = hasMinRole(role, 'admin');
-  const isModeratorOnly = role === 'moderator';
 
   const accountsFetchRef = useRef(0);
   const fetchAccounts = async (opts: { isManual?: boolean; page?: number; q?: string } = {}) => {
@@ -185,7 +184,7 @@ export default function AdminPanel() {
           <LogIn className="w-8 h-8" />
         </div>
         <h1 className="text-2xl font-bold text-slate-900">Sign in required</h1>
-        <p className="text-slate-500 mt-2 mb-6">Sign in to your ROwO account to access the admin panel.</p>
+        <p className="text-slate-500 mt-2 mb-6">Sign in to your ROwO account to access the management panel.</p>
         <Link
           to="/login"
           className="inline-flex items-center gap-2 py-2.5 px-5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-xl transition-colors"
@@ -203,7 +202,7 @@ export default function AdminPanel() {
           <ShieldOff className="w-8 h-8" />
         </div>
         <h1 className="text-2xl font-bold text-slate-900">Access denied</h1>
-        <p className="text-slate-500 mt-2 mb-6">Your ROwO account does not have admin panel access.</p>
+        <p className="text-slate-500 mt-2 mb-6">Your ROwO account does not have management panel access.</p>
         <Link
           to="/center"
           className="inline-flex items-center gap-2 py-2.5 px-5 bg-slate-900 hover:bg-black text-white text-sm font-medium rounded-xl transition-colors"
@@ -214,14 +213,40 @@ export default function AdminPanel() {
     );
   }
 
+  // Privileged roles must have at least one strong 2FA method (TOTP or a
+  // passkey) configured before they can access the management panel.
+  // Recovery codes alone do not count — they're a fallback, not a primary 2FA.
+  const hasTwoFactor = Boolean(
+    twoFactor && (twoFactor.totp_enabled || (twoFactor.passkeys && twoFactor.passkeys.length > 0))
+  );
+  if (!hasTwoFactor) {
+    return (
+      <div className="max-w-md mx-auto mt-20 bg-white p-8 rounded-3xl shadow-sm border border-slate-200 text-center">
+        <div className="bg-amber-100 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 text-amber-600">
+          <ShieldCheck className="w-8 h-8" />
+        </div>
+        <h1 className="text-2xl font-bold text-slate-900">Two-factor authentication required</h1>
+        <p className="text-slate-500 mt-2 mb-6">
+          The Management Panel is restricted to accounts protected by two-factor authentication. Set up TOTP or add a passkey from your User Center, then come back.
+        </p>
+        <Link
+          to="/center?tab=security"
+          className="inline-flex items-center gap-2 py-2.5 px-5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-xl transition-colors"
+        >
+          Go to Security settings
+        </Link>
+      </div>
+    );
+  }
+
 
   return (
     <div className="max-w-5xl mx-auto">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">{isModeratorOnly ? 'Moderator Panel' : 'Admin Panel'}</h1>
+          <h1 className="text-2xl font-bold text-slate-900">Management Panel</h1>
           <p className="text-sm text-slate-500 mt-1">
-            {isModeratorOnly ? 'Review pending manual verifications' : 'Manage verified student accounts and security'}
+            Manage verified student accounts and security
           </p>
         </div>
         <div className="flex items-center gap-4">
