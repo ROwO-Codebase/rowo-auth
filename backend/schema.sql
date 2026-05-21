@@ -50,14 +50,16 @@ CREATE TABLE discord_verified_identities (
   guild_id TEXT NOT NULL,
   role_id TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  matched_email_hash TEXT
 );
 CREATE TABLE github_verified_identities (
   github_id TEXT PRIMARY KEY,
   github_login TEXT NOT NULL,
   matched_email_domain TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  matched_email_hash TEXT
 );
 CREATE TABLE discord_trusted_servers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -24,7 +24,6 @@ export default function DiscordCallback() {
   const [message, setMessage] = useState('Verifying your Discord identity...');
   const [discordData, setDiscordData] = useState<{ discord_id: string; username: string; avatar?: string } | null>(null);
   const [wechatId, setWechatId] = useState('');
-  const [isReverify, setIsReverify] = useState(false);
   const [postVerify, setPostVerify] = useState<{ bindToken: string; wechatId: string; method: string; reverified: boolean; alreadyLinkedToRowo: boolean } | null>(null);
 
   const code = searchParams.get('code');
@@ -40,6 +39,42 @@ export default function DiscordCallback() {
       return;
     }
     consumedDiscordCodes.add(code);
+
+    const runConnect = async (wechat: string, discordId: string) => {
+      setStatus('connecting');
+      setMessage('Connecting your accounts...');
+      try {
+        const res = await fetch(`${__API_ENDPOINT__}/api/verify/discord/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ wechat_id: wechat, discord_id: discordId }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          setStatus('success');
+          setMessage('Successfully verified! Your WeChat account is now linked to your student status.');
+          if (data.bind_token && data.wechat_id) {
+            setPostVerify({
+              bindToken: data.bind_token,
+              wechatId: data.wechat_id,
+              method: 'Discord',
+              reverified: Boolean(data.reverified),
+              alreadyLinkedToRowo: Boolean(data.already_linked_to_rowo),
+            });
+          }
+        } else {
+          setStatus('error');
+          if (data.blacklisted && data.blacklist) {
+            setMessage(`Verification blocked: This account is blacklisted. Reason: ${data.blacklist.reason}`);
+          } else {
+            setMessage(data.message || 'Failed to connect accounts.');
+          }
+        }
+      } catch {
+        setStatus('error');
+        setMessage('An error occurred while connecting your accounts.');
+      }
+    };
 
     const verifyDiscord = async () => {
       try {
@@ -57,8 +92,11 @@ export default function DiscordCallback() {
             avatar: data.avatar
           });
           if (data.existing_wechat_id) {
+            // Skip the re-verify confirmation screen and head straight to
+            // sign in / sign up via PostVerifyPrompt.
             setWechatId(data.existing_wechat_id);
-            setIsReverify(true);
+            await runConnect(data.existing_wechat_id, data.discord_id);
+            return;
           }
           setStatus('input_wechat');
           setMessage('Discord verified! Now enter your WeChat ID to complete the link.');
@@ -70,7 +108,7 @@ export default function DiscordCallback() {
             setMessage(data.message || 'Failed to verify Discord identity.');
           }
         }
-      } catch (error) {
+      } catch {
         setStatus('error');
         setMessage('An error occurred while communicating with the server.');
       }
@@ -170,30 +208,23 @@ export default function DiscordCallback() {
               </div>
             )}
             <div>
-              <h2 className="text-2xl font-bold text-slate-900">{isReverify ? 'Re-verify Existing Account' : 'Link WeChat ID'}</h2>
+              <h2 className="text-2xl font-bold text-slate-900">Link WeChat ID</h2>
               <p className="text-slate-500 mt-2">Logged in as <span className="font-semibold text-slate-900">{discordData?.username}</span></p>
-              {isReverify && (
-                <p className="mt-3 text-sm text-slate-600">
-                  WeChat ID: <span className="font-mono text-slate-900">{wechatId}</span>
-                </p>
-              )}
             </div>
             <form onSubmit={handleConnect} className="w-full space-y-4">
-              {!isReverify && (
-                <input
-                  type="text"
-                  value={wechatId}
-                  onChange={(e) => setWechatId(e.target.value)}
-                  placeholder="Enter your WeChat ID"
-                  required
-                  className="block w-full px-4 py-3 rounded-xl border border-slate-300 shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors"
-                />
-              )}
+              <input
+                type="text"
+                value={wechatId}
+                onChange={(e) => setWechatId(e.target.value)}
+                placeholder="Enter your WeChat ID"
+                required
+                className="block w-full px-4 py-3 rounded-xl border border-slate-300 shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-colors"
+              />
               <button
                 type="submit"
                 className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl shadow-sm transition-colors"
               >
-                {isReverify ? 'Continue Re-verification' : 'Complete Verification'}
+                Complete Verification
               </button>
             </form>
           </div>
