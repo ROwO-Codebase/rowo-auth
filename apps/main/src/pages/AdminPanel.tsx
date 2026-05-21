@@ -111,6 +111,7 @@ export default function AdminPanel() {
 
   const role: RowoRole = (user?.role as RowoRole) || 'user';
   const isAtLeastAdmin = hasMinRole(role, 'admin');
+  const isSuperAdmin = role === 'super_admin';
 
   const accountsFetchRef = useRef(0);
   const fetchAccounts = async (opts: { isManual?: boolean; page?: number; q?: string } = {}) => {
@@ -289,16 +290,18 @@ export default function AdminPanel() {
         </button>
         {isAtLeastAdmin && (
           <>
-            <button
-              onClick={() => setActiveTab('rowoUsers')}
-              className={clsx(
-                "px-4 py-2 text-sm font-medium transition-colors relative",
-                activeTab === 'rowoUsers' ? "text-indigo-600" : "text-slate-500 hover:text-slate-700"
-              )}
-            >
-              ROwO Users
-              {activeTab === 'rowoUsers' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
-            </button>
+            {isSuperAdmin && (
+              <button
+                onClick={() => setActiveTab('rowoUsers')}
+                className={clsx(
+                  "px-4 py-2 text-sm font-medium transition-colors relative",
+                  activeTab === 'rowoUsers' ? "text-indigo-600" : "text-slate-500 hover:text-slate-700"
+                )}
+              >
+                ROwO Users
+                {activeTab === 'rowoUsers' && <motion.div layoutId="activeTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-600" />}
+              </button>
+            )}
             <button
               onClick={() => setActiveTab('roles')}
               className={clsx(
@@ -458,7 +461,7 @@ export default function AdminPanel() {
         </>
       ) : activeTab === 'blacklist' ? (
         <BlacklistTab blacklist={blacklist} loading={loadingBlacklist} onUpdate={fetchBlacklist} />
-      ) : activeTab === 'rowoUsers' && isAtLeastAdmin ? (
+      ) : activeTab === 'rowoUsers' && isSuperAdmin ? (
         <RowoUsersTab />
       ) : (
         <BatchTab onUpdate={fetchAccounts} />
