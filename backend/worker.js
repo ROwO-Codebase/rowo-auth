@@ -1711,11 +1711,50 @@ function userToAdminShape(user) {
   };
 }
 
+// Returns true when the user has at least one strong 2FA method active
+// (confirmed TOTP or a registered passkey). Recovery codes alone do NOT
+// satisfy this gate — they're a fallback, not a primary 2FA method.
+async function userHasStrongTwoFactor(env, userId) {
+  if (!userId) return false;
+  try {
+    const totp = await queryFirst(
+      env,
+      'SELECT 1 AS present FROM user_totp_credentials WHERE user_id = ? AND confirmed_at IS NOT NULL LIMIT 1',
+      [userId]
+    );
+    if (totp) return true;
+    const passkey = await queryFirst(
+      env,
+      'SELECT 1 AS present FROM user_passkey_credentials WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    return Boolean(passkey);
+  } catch (error) {
+    logServerError('require_role_2fa_check', error);
+    return false;
+  }
+}
+
 async function requireRole(request, env, minRole) {
   const auth = await requireUserAuth(request, env);
   if (auth.response) return auth;
   if (!rolesAtLeast(auth.user.role, minRole)) {
     return { response: jsonResponse({ success: false, message: 'Forbidden' }, 403) };
+  }
+  // Every privileged role (moderator/admin/super_admin) must have at least one
+  // strong 2FA method enrolled. This mirrors the AdminPanel UI gate so the
+  // management API is unreachable without TOTP or a passkey on file.
+  if (!(await userHasStrongTwoFactor(env, auth.user.id))) {
+    return {
+      response: jsonResponse(
+        {
+          success: false,
+          message: 'Two-factor authentication is required for management access. Set up TOTP or a passkey in your User Center.',
+          two_factor_setup_required: true,
+        },
+        403
+      ),
+    };
   }
   return { user: auth.user, admin: userToAdminShape(auth.user) };
 }
@@ -4298,13 +4337,9 @@ async function handleRequest(request, env, ctx) {
       if (auth.response) return auth.response;
 
       const { page, pageSize, like } = parsePaginationParams(url);
-      const isModerator = auth.admin.role === 'moderator';
 
       const where = [];
       const params = [];
-      if (isModerator) {
-        where.push("manual_status = 'pending'");
-      }
       if (like) {
         where.push(
           "(LOWER(wechat_id) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(student_name, '')) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(student_id, '')) LIKE ? ESCAPE '\\')"
@@ -4320,9 +4355,7 @@ async function handleRequest(request, env, ctx) {
       );
       const total = Number(countRow?.c ?? 0);
 
-      const orderBy = isModerator
-        ? 'ORDER BY verification_time DESC'
-        : "ORDER BY CASE WHEN manual_status = 'pending' THEN 0 ELSE 1 END, verification_time DESC";
+      const orderBy = "ORDER BY CASE WHEN manual_status = 'pending' THEN 0 ELSE 1 END, verification_time DESC";
 
       const accounts = await queryAll(
         env,
@@ -4781,7 +4814,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (method === 'GET' && pathname === '/api/admin/users') {
-      const auth = await requireRole(request, env, 'admin');
+      const auth = await requireRole(request, env, 'super_admin');
       if (auth.response) return auth.response;
 
       const { page, pageSize, like } = parsePaginationParams(url);
@@ -4836,7 +4869,7 @@ async function handleRequest(request, env, ctx) {
 
     const userResetMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/reset-password$/);
     if (method === 'POST' && userResetMatch) {
-      const auth = await requireRole(request, env, 'admin');
+      const auth = await requireRole(request, env, 'super_admin');
       if (auth.response) return auth.response;
       const id = decodeURIComponent(userResetMatch[1]);
       const body = await parseJson(request);
@@ -4872,7 +4905,7 @@ async function handleRequest(request, env, ctx) {
 
     const userUnbindMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/unbind-wechat$/);
     if (method === 'POST' && userUnbindMatch) {
-      const auth = await requireRole(request, env, 'admin');
+      const auth = await requireRole(request, env, 'super_admin');
       if (auth.response) return auth.response;
       const id = decodeURIComponent(userUnbindMatch[1]);
       const target = await queryFirst(env, 'SELECT id FROM user_accounts WHERE id = ?', [id]);
@@ -4970,6 +5003,12 @@ async function handleRequest(request, env, ctx) {
       if (q.length < 1) {
         return jsonResponse({ success: true, results: [] });
       }
+      // Restrict results to roles the caller is eligible to promote to a
+      // higher role: admins can only promote regular users (to moderator),
+      // super_admins can promote users (to moderator) or moderators (to admin).
+      const isSuper = auth.user.role === 'super_admin';
+      const promotableRoles = isSuper ? ['user', 'moderator'] : ['user'];
+      const rolePlaceholders = promotableRoles.map(() => '?').join(', ');
       const like = `%${q.replace(/[%_]/g, (m) => `\\${m}`)}%`;
       const rows = await queryAll(
         env,
@@ -4977,10 +5016,11 @@ async function handleRequest(request, env, ctx) {
           SELECT id, username_display, role, role_assigned_by
           FROM user_accounts
           WHERE LOWER(username_normalized) LIKE ? ESCAPE '\\'
+            AND role IN (${rolePlaceholders})
           ORDER BY username_normalized
           LIMIT 20
         `,
-        [like]
+        [like, ...promotableRoles]
       );
       return jsonResponse({
         success: true,
