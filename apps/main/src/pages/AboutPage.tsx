@@ -4,7 +4,7 @@ import { ShieldCheck, Lock, Users, Server, Github, ExternalLink, Shield, Mail, K
 
 export default function AboutPage() {
   const commitHash = (__GIT_COMMIT_HASH__ || 'unknown').trim();
-  const commitUrl = commitHash !== 'unknown' ? `https://github.com/Pitrick3141/rowo-auth/commit/${commitHash}` : '';
+  const commitUrl = commitHash !== 'unknown' ? `https://github.com/ROwO-Codebase/rowo-auth/commit/${commitHash}` : '';
 
   return (
     <div className="max-w-3xl mx-auto py-8">
@@ -176,7 +176,7 @@ export default function AboutPage() {
                 <ExternalLink className="w-4 h-4" />
               </a>
               <a
-                href="https://github.com/Pitrick3141/rowo-auth"
+                href="https://github.com/ROwO-Codebase/rowo-auth"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-6 py-3 bg-slate-700 text-white rounded-xl font-medium hover:bg-slate-600 transition-colors"
