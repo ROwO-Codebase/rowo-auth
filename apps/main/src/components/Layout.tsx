@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ShieldCheck, UserCheck, Info, HelpCircle, Github, LogIn, UserPlus, User as UserIcon, LogOut, ChevronDown } from 'lucide-react';
+import { ShieldCheck, UserCheck, Info, HelpCircle, Github, LogIn, UserPlus, User as UserIcon, LogOut, ChevronDown, TriangleAlert } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useSession } from '../contexts/SessionContext';
+import { isPreviewDeployment } from '../environment';
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation();
@@ -38,6 +39,20 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col">
       <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
+        {isPreviewDeployment && (
+          <div className="border-b border-amber-300 bg-amber-100 text-amber-950" role="status">
+            <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-2 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-center text-sm font-medium">
+              <TriangleAlert className="w-4 h-4 shrink-0" aria-hidden="true" />
+              <span>You are viewing the preview version of ROwO Auth. Features and data may change.</span>
+              <a
+                href="https://rowo.link/"
+                className="font-semibold underline underline-offset-2 hover:text-amber-700 transition-colors"
+              >
+                Go to the production site
+              </a>
+            </div>
+          </div>
+        )}
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <img src={__ICON_URL__} alt="ROwO Auth Logo" className="w-8 h-8 rounded-xl" referrerPolicy="no-referrer" />
