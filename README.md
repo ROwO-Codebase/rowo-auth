@@ -97,30 +97,20 @@ Each frontend deploys as its own Cloudflare Pages project, both connected to thi
 
 Leave the *Root directory* setting blank — builds must run from the repo root so npm workspaces resolve. Cloudflare auto-spawns preview deployments for non-production branches.
 
-## Cloudflare Worker Deploy (CI/CD Ready)
+## Cloudflare Worker Deploy (CI/CD)
 
-This repository includes Worker deployment config at `backend/wrangler.toml` for `backend/worker.js`.
+This repository includes the Worker deployment config at `backend/wrangler.toml` for `backend/worker.js`. The D1 `database_id` values intentionally use `${D1_DATABASE_ID_*}` placeholders so the real IDs do not need to be committed.
 
 ### One-time setup
 
-1. Update placeholders in `backend/wrangler.toml`:
-   - `account_id`
-   - `database_id` values under `d1_databases`
-2. Authenticate Wrangler locally:
-   - `npx wrangler login`
-3. Add required Worker secrets (encrypted values):
-   - `npx wrangler secret put SENSITIVE_DATA_HASH_SECRET --config backend/wrangler.toml --env production`
-   - `npx wrangler secret put ADFS_JWT_SECRET --config backend/wrangler.toml --env production`
-   - `npx wrangler secret put AWS_ACCESS_KEY_ID --config backend/wrangler.toml --env production`
-   - `npx wrangler secret put AWS_SECRET_ACCESS_KEY --config backend/wrangler.toml --env production`
-   - `npx wrangler secret put DISCORD_CLIENT_SECRET --config backend/wrangler.toml --env production`
-   - `npx wrangler secret put DISCORD_BOT_TOKEN --config backend/wrangler.toml --env production`
-   - `npx wrangler secret put GITHUB_CLIENT_SECRET --config backend/wrangler.toml --env production`
-4. Set plaintext variables in `backend/wrangler.toml` under `[vars]` and `[env.production.vars]` (already scaffolded in this repo).
+1. Create or identify the `rowo-auth` Worker and the preview and production D1 databases.
+2. In the Worker's **Settings > Variables & Secrets**, add the runtime secrets listed below. Runtime secrets must not be configured only as build variables because build variables are not available to the deployed Worker.
+3. Keep plaintext runtime variables in `backend/wrangler.toml` under `[vars]` and `[env.production.vars]` (already scaffolded in this repo).
+4. Connect the Worker to this Git repository under **Settings > Builds**.
 
 ### Environment variable catalog
 
-#### Secrets (encrypted via `wrangler secret put`)
+#### Secrets (encrypted Worker runtime secrets)
 
 - `ADFS_JWT_SECRET`: Authenticate requests and ensure they come from the ADFS provider.
 - `AWS_ACCESS_KEY_ID`: Send verification emails through AWS SES.
@@ -146,14 +136,41 @@ This repository includes Worker deployment config at `backend/wrangler.toml` for
 
 Trusted Discord guild/role pairs are configured in D1 (`discord_trusted_servers` table), not in environment variables.
 
-### Deploy commands
+### Workers Builds configuration
 
-- Default deploy:
-  - `npm run deploy:worker`
-- Production deploy (for `main` branch release pipeline):
-  - `npm run deploy:worker:prod`
+Configure the production build under **Worker > Settings > Builds > Build Configuration**:
 
-For Cloudflare CI/CD, use the same production command (`npx wrangler deploy --config backend/wrangler.toml --env production`) in your `main` branch pipeline.
+| Setting | Value |
+|---|---|
+| Production branch | `main` |
+| Root directory | Leave blank so commands run from the repository root |
+| Build command | Use the render command below |
+| Deploy command | `npx wrangler deploy --config backend/wrangler.deploy.toml --env production` |
+| Non-production branch builds | Disable unless a separate preview deployment workflow is configured |
+
+Under **Settings > Builds > Build Variables and Secrets**, add:
+
+- `D1_DATABASE_ID_PREVIEW`: preview D1 database UUID.
+- `D1_DATABASE_ID_PRODUCTION`: production D1 database UUID.
+- `CLOUDFLARE_ACCOUNT_ID`: Cloudflare account ID.
+
+The D1 IDs may be stored as build secrets. They are used only while rendering and deploying the Wrangler configuration and are not Worker runtime variables.
+
+Wrangler does not expand arbitrary `${VAR}` placeholders inside `wrangler.toml`. Set the following as the Cloudflare **Build command** to render an ephemeral configuration using the Node.js runtime provided by Workers Builds:
+
+```sh
+node -e 'const fs=require("node:fs");const names=["D1_DATABASE_ID_PREVIEW","D1_DATABASE_ID_PRODUCTION"];let s=fs.readFileSync("backend/wrangler.toml","utf8");for(const n of names){const v=process.env[n];if(!v)throw new Error("Missing build variable: "+n);s=s.replaceAll("${"+n+"}",v)}fs.writeFileSync("backend/wrangler.deploy.toml",s)'
+```
+
+The generated `backend/wrangler.deploy.toml` remains in Cloudflare's temporary build workspace and is consumed by the Deploy command. It is already excluded by `.gitignore` and is never committed.
+
+If `envsubst` is known to be available in the selected build image, the equivalent Build command is:
+
+```sh
+envsubst '$D1_DATABASE_ID_PREVIEW $D1_DATABASE_ID_PRODUCTION' < backend/wrangler.toml > backend/wrangler.deploy.toml
+```
+
+The Node.js command is preferred because Workers Builds guarantees Node.js support, while `envsubst` is not guaranteed to be installed.
 
 ### D1 schema migration
 

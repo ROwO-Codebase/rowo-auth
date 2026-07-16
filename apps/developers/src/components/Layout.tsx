@@ -116,7 +116,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             )}
 
             <a
-              href="https://github.com/Pitrick3141/rowo-auth"
+              href="https://github.com/ROwO-Codebase/rowo-auth"
               target="_blank"
               rel="noopener noreferrer"
               aria-label="GitHub repository"

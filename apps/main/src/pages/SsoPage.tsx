@@ -9,6 +9,7 @@ import { useSession } from '../contexts/SessionContext';
 // exfiltration to attacker-controlled hosts.
 const ALLOWED_NEXT_ORIGINS = new Set([
   'https://developers.rowo.link',
+  'https://academic.rowo.link',
   'http://localhost:5174',
 ]);
 
