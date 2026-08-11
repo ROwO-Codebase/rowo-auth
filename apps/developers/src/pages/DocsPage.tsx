@@ -1,12 +1,13 @@
 import { useMemo } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, Navigate, useLocation, useParams } from 'react-router-dom';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { BookOpen, ListTree } from 'lucide-react';
 import { clsx } from 'clsx';
 import { DOCS, type DocSlug } from '../docs/content';
+import { NEXUS_DOC_LIST, NEXUS_DOCS } from '../docs/nexusContent';
 
-const DOC_LIST: { slug: DocSlug; title: string; blurb: string }[] = [
+const OAUTH_DOC_LIST: { slug: DocSlug; title: string; blurb: string }[] = [
   { slug: 'overview', title: 'Overview', blurb: 'What you can build with ROwO identity.' },
   { slug: 'oauth-flow', title: 'OAuth code flow', blurb: 'End-to-end walkthrough of the authorization-code grant.' },
   { slug: 'api-reference', title: 'API reference', blurb: 'Every endpoint your app might call, with request/response shapes.' },
@@ -41,14 +42,14 @@ const markdownComponents: Components = {
     return (
       <h2
         id={id}
-        className="text-lg sm:text-xl font-semibold text-slate-900 mt-10 sm:mt-12 mb-3 pb-2 border-b border-slate-200 scroll-mt-24"
+        className="text-lg sm:text-xl font-semibold text-slate-900 mt-10 sm:mt-12 mb-3 pb-2 border-b border-slate-200 scroll-mt-36"
       >
         {children}
       </h2>
     );
   },
   h3: ({ children }) => (
-    <h3 className="text-base font-semibold text-slate-900 mt-7 mb-2 scroll-mt-24">
+    <h3 className="text-base font-semibold text-slate-900 mt-7 mb-2 scroll-mt-36">
       {children}
     </h3>
   ),
@@ -128,12 +129,20 @@ const REMARK_PLUGINS = [remarkGfm];
 
 export default function DocsPage() {
   const { slug } = useParams<{ slug?: string }>();
-  const activeSlug: DocSlug = useMemo(() => {
-    if (slug && slug in DOCS) return slug as DocSlug;
-    return 'overview';
-  }, [slug]);
+  const location = useLocation();
+  const isNexus = location.pathname.startsWith('/nexus/docs');
+  const docs: Readonly<Record<string, string>> = isNexus ? NEXUS_DOCS : DOCS;
+  const docList = isNexus ? NEXUS_DOC_LIST : OAUTH_DOC_LIST;
+  const basePath = isNexus ? '/nexus/docs' : '/docs';
+  const defaultSlug = isNexus ? 'introduction' : 'overview';
+  const sectionLabel = isNexus ? 'Nexus docs' : 'OAuth docs';
 
-  const content = DOCS[activeSlug];
+  const activeSlug = useMemo(() => {
+    if (slug && Object.prototype.hasOwnProperty.call(docs, slug)) return slug;
+    return defaultSlug;
+  }, [defaultSlug, docs, slug]);
+
+  const content = docs[activeSlug];
 
   const toc = useMemo(() => {
     const matches = [...content.matchAll(/^## (.+)$/gm)];
@@ -143,18 +152,22 @@ export default function DocsPage() {
     });
   }, [content]);
 
-  const active = DOC_LIST.find((d) => d.slug === activeSlug);
+  const active = docList.find((d) => d.slug === activeSlug);
   const showToc = toc.length > 1;
+
+  if (slug && !Object.prototype.hasOwnProperty.call(docs, slug)) {
+    return <Navigate to={`${basePath}/${defaultSlug}`} replace />;
+  }
 
   return (
     <div className="space-y-4 md:space-y-0">
       {/* Mobile-only horizontal tab strip — saves vertical space on phones */}
-      <nav className="md:hidden flex items-center gap-2 overflow-x-auto -mx-4 px-4 pb-1">
+      <nav className="md:hidden flex items-center gap-2 overflow-x-auto overscroll-x-contain -mx-4 px-4 pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <BookOpen className="w-4 h-4 text-indigo-600 shrink-0" />
-        {DOC_LIST.map((d) => (
+        {docList.map((d) => (
           <Link
             key={d.slug}
-            to={`/docs/${d.slug}`}
+            to={`${basePath}/${d.slug}`}
             className={clsx(
               'px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors shrink-0',
               activeSlug === d.slug
@@ -176,16 +189,18 @@ export default function DocsPage() {
         )}
       >
         {/* Sidebar nav — hidden on mobile (replaced by pill strip above) */}
-        <aside className="hidden md:block md:sticky md:top-20 md:self-start">
+        <aside className="hidden md:block md:sticky md:top-32 md:self-start">
           <div className="flex items-center gap-2 mb-3 px-2">
             <BookOpen className="w-4 h-4 text-indigo-600" />
-            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Docs</span>
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              {sectionLabel}
+            </span>
           </div>
           <nav className="space-y-1">
-            {DOC_LIST.map((d) => (
+            {docList.map((d) => (
               <Link
                 key={d.slug}
-                to={`/docs/${d.slug}`}
+                to={`${basePath}/${d.slug}`}
                 className={clsx(
                   'block px-3 py-2 rounded-lg text-sm transition-colors',
                   activeSlug === d.slug
@@ -214,14 +229,14 @@ export default function DocsPage() {
 
         {/* TOC — only when there's enough room (xl+) and there's more than one H2 */}
         {showToc && (
-          <aside className="hidden xl:block xl:sticky xl:top-20 xl:self-start">
+          <aside className="hidden xl:block xl:sticky xl:top-32 xl:self-start">
             <div className="flex items-center gap-2 mb-3 px-2">
               <ListTree className="w-4 h-4 text-slate-400" />
               <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 On this page
               </span>
             </div>
-            <nav className="space-y-1 border-l border-slate-200 max-h-[calc(100vh-8rem)] overflow-y-auto pr-1">
+            <nav className="space-y-1 border-l border-slate-200 max-h-[calc(100vh-10rem)] overflow-y-auto pr-1">
               {toc.map((item) => (
                 <a
                   key={item.id}

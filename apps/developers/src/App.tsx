@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Navigate, Route, Routes } from 'react-router-dom';
 import Layout from './components/Layout';
 import { SessionProvider } from './contexts/SessionContext';
 import DevLandingPage from './pages/DevLandingPage';
@@ -14,6 +14,8 @@ import ClientDetailPage from './pages/ClientDetailPage';
 import DocsPage from './pages/DocsPage';
 import PlaygroundPage from './pages/PlaygroundPage';
 import TokenHelperPage from './pages/TokenHelperPage';
+import NexusLandingPage from './pages/NexusLandingPage';
+import NexusPlaygroundPage from './pages/NexusPlaygroundPage';
 
 export default function App() {
   return (
@@ -30,6 +32,11 @@ export default function App() {
             <Route path="/docs/:slug" element={<DocsPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />
             <Route path="/tokens" element={<TokenHelperPage />} />
+            <Route path="/nexus" element={<NexusLandingPage />} />
+            <Route path="/nexus/docs" element={<DocsPage />} />
+            <Route path="/nexus/docs/:slug" element={<DocsPage />} />
+            <Route path="/nexus/playground" element={<NexusPlaygroundPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Layout>
       </Router>

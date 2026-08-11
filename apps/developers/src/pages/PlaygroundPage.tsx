@@ -207,9 +207,9 @@ export default function PlaygroundPage() {
     <div className="max-w-4xl mx-auto">
       <div className="flex items-center gap-2 mb-1">
         <FlaskConical className="w-5 h-5 text-indigo-600" />
-        <h1 className="text-2xl font-bold text-slate-900">API playground</h1>
+        <h1 className="text-2xl font-bold text-slate-900">OAuth API playground</h1>
       </div>
-      <p className="text-sm text-slate-500 mb-6">Call any endpoint with your session token, straight from this browser tab.</p>
+      <p className="text-sm text-slate-500 mb-6">Call ROwO account and OAuth endpoints with your session token, straight from this browser tab.</p>
 
       {!loading && needsSessionButMissing && (
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 flex items-start gap-3">
