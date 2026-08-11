@@ -27,6 +27,7 @@ export default defineConfig(() => {
     ],
     define: {
       '__API_ENDPOINT__': JSON.stringify(pkg.config.api_endpoint),
+      '__NEXUS_API_ENDPOINT__': JSON.stringify(pkg.config.nexus_api_endpoint),
       '__ICON_URL__': JSON.stringify(pkg.config.icon_url),
       '__GIT_COMMIT_HASH__': JSON.stringify(gitCommitHash),
     },

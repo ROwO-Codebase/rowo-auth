@@ -5,6 +5,7 @@
   "type": "module",
   "config": {
     "api_endpoint": "https://api.rowo.link",
+    "nexus_api_endpoint": "https://nexus.rowo.link",
     "icon_url": "https://cdn.rowo.link/logo.png"
   },
   "scripts": {
