@@ -34,7 +34,7 @@ export default function TokenHelperPage() {
   };
 
   return (
-    <div className="max-w-3xl mx-auto">
+    <div>
       <div className="flex items-center gap-2 mb-1">
         <KeyRound className="w-5 h-5 text-indigo-600" />
         <h1 className="text-2xl font-bold text-slate-900">Token helper</h1>

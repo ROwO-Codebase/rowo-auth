@@ -61,10 +61,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     startsWithRoute(location.pathname, route),
   );
   const sectionLinks = isNexus ? NEXUS_LINKS : isOAuth ? OAUTH_LINKS : [];
-  const isDocumentation =
-    startsWithRoute(location.pathname, '/docs') ||
-    startsWithRoute(location.pathname, '/nexus/docs');
-
   useEffect(() => {
     if (!menuOpen) return;
     const onClick = (event: MouseEvent) => {
@@ -227,12 +223,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         )}
       </header>
 
-      <main
-        className={clsx(
-          'flex-1 w-full mx-auto px-4 sm:px-6 lg:px-8 py-8',
-          isDocumentation ? 'max-w-7xl 2xl:max-w-[88rem]' : 'max-w-6xl',
-        )}
-      >
+      <main className="flex-1 w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {children}
       </main>
 

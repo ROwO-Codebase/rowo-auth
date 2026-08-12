@@ -16,7 +16,7 @@ export default function DevLandingPage() {
   const { user } = useSession();
 
   return (
-    <div className="max-w-5xl mx-auto space-y-10 sm:space-y-14">
+    <div className="space-y-10 sm:space-y-14">
       <section className="text-center mt-6 sm:mt-12">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 text-xs font-semibold mb-5">
           <ShieldCheck className="w-3.5 h-3.5" />

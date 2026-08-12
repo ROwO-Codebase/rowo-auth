@@ -56,7 +56,7 @@ export default function NexusPlaygroundPage() {
   const [mode, setMode] = useState<PlaygroundMode>('request');
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 mb-2">
@@ -115,13 +115,38 @@ export default function NexusPlaygroundPage() {
         />
       </div>
 
-      {mode === 'request' ? (
-        <RequestBuilder />
-      ) : mode === 'identity-status' ? (
-        <IdentityStatusLookup />
-      ) : (
-        <DeviceStatusLookup />
-      )}
+      <div className="grid">
+        <div
+          className={clsx(
+            'col-start-1 row-start-1 min-w-0',
+            mode !== 'request' && 'invisible pointer-events-none',
+          )}
+          aria-hidden={mode !== 'request'}
+          inert={mode !== 'request'}
+        >
+          <RequestBuilder />
+        </div>
+        <div
+          className={clsx(
+            'col-start-1 row-start-1 min-w-0',
+            mode !== 'identity-status' && 'invisible pointer-events-none',
+          )}
+          aria-hidden={mode !== 'identity-status'}
+          inert={mode !== 'identity-status'}
+        >
+          <IdentityStatusLookup />
+        </div>
+        <div
+          className={clsx(
+            'col-start-1 row-start-1 min-w-0',
+            mode !== 'device-status' && 'invisible pointer-events-none',
+          )}
+          aria-hidden={mode !== 'device-status'}
+          inert={mode !== 'device-status'}
+        >
+          <DeviceStatusLookup />
+        </div>
+      </div>
 
       <div className="grid sm:grid-cols-2 gap-4">
         <ServiceLink

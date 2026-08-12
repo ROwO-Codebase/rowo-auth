@@ -52,7 +52,7 @@ export default function ClientsListPage() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto">
+    <div>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">OAuth clients</h1>
