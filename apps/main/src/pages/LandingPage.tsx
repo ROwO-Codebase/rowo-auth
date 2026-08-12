@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, CheckCircle2, XCircle, Clock, Shield, AlertTriangle, Info, ShieldAlert, Pencil, RefreshCw, GraduationCap, ArrowUpRight } from 'lucide-react';
+import { Search, CheckCircle2, XCircle, Clock, Shield, AlertTriangle, Info, ShieldAlert, Pencil, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { clsx } from 'clsx';
@@ -80,39 +80,6 @@ export default function LandingPage() {
 
   return (
     <div className="max-w-2xl mx-auto flex flex-col items-center justify-center min-h-[60vh]">
-      <motion.a
-        href="https://academic.rowo.link"
-        target="_blank"
-        rel="noopener noreferrer"
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="group relative w-full mb-8 overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-violet-600 to-cyan-600 p-5 sm:p-6 text-white shadow-lg shadow-indigo-200/60 transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
-        aria-label="Visit ROwO Academic"
-      >
-        <div className="absolute -right-12 -top-16 h-40 w-40 rounded-full bg-white/10 blur-2xl" aria-hidden="true" />
-        <div className="relative flex flex-col sm:flex-row sm:items-center gap-4">
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/15 ring-1 ring-white/25">
-            <GraduationCap className="h-6 w-6" aria-hidden="true" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="mb-1.5 flex items-center gap-2">
-              <span className="rounded-full bg-white/20 px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide ring-1 ring-white/25">
-                New
-              </span>
-              <span className="text-sm font-medium text-indigo-100">Now available</span>
-            </div>
-            <h2 className="text-xl font-bold tracking-tight">ROwO Academic</h2>
-            <p className="mt-1 text-sm leading-relaxed text-indigo-50">
-              Program progress tracking, course validation, and academic planning for UWaterloo students.
-            </p>
-          </div>
-          <span className="inline-flex shrink-0 items-center gap-1.5 text-sm font-semibold text-white sm:self-end">
-            Explore
-            <ArrowUpRight className="h-4 w-4 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" aria-hidden="true" />
-          </span>
-        </div>
-      </motion.a>
-
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
