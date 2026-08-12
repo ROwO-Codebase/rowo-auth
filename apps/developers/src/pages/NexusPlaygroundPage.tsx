@@ -62,8 +62,8 @@ export default function NexusPlaygroundPage() {
           </div>
           <h1 className="text-3xl font-bold tracking-tight text-slate-900">Nexus playground</h1>
           <p className="text-sm text-slate-600 mt-2 max-w-2xl">
-            Explore proof request shapes and public identity status without OAuth credentials,
-            private keys, or pasted live proofs.
+            Explore negotiated v2 proof requests and public identity status without OAuth
+            credentials, private keys, or pasted live proofs.
           </p>
         </div>
         <a
@@ -107,9 +107,9 @@ export default function NexusPlaygroundPage() {
 
       <div className="grid sm:grid-cols-2 gap-4">
         <ServiceLink
-          title="Discovery document"
-          body="Inspect supported protocols, suites, registry URL, service keys, and wallet URL."
-          href={`${__NEXUS_API_ENDPOINT__}/.well-known/nexus.json`}
+          title="V2 discovery document"
+          body="Inspect v1/v2 protocols, device registry, popup channels, service keys, and wallet URL."
+          href={`${__NEXUS_API_ENDPOINT__}/.well-known/nexus-v2.json`}
         />
         <ServiceLink
           title="Registry and status JWKS"
@@ -155,8 +155,15 @@ const nexus = createNexusClient({
 // Obtain this object from your backend challenge endpoint.
 const request = ${requestJson};
 
-const { proof } = await nexus.requestProof(request);
-// Send proof + your challenge ID to your backend for verification.`;
+const result = await nexus.requestProofV2(request, {
+  // Copy the exact ordered policy from your backend challenge.
+  acceptedProofProtocols: [
+    'nexus.ownership-proof.v2',
+    'nexus.ownership-proof.v1',
+  ],
+});
+// Send result.proofProtocol + result.proof + your challenge ID
+// to your backend for matching verification.`;
 
   const regenerate = () => {
     setNonce(randomNonce());
