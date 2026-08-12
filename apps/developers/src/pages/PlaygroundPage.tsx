@@ -204,7 +204,7 @@ export default function PlaygroundPage() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto">
+    <div>
       <div className="flex items-center gap-2 mb-1">
         <FlaskConical className="w-5 h-5 text-indigo-600" />
         <h1 className="text-2xl font-bold text-slate-900">OAuth API playground</h1>
