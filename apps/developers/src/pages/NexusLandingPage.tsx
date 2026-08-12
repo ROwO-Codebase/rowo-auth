@@ -9,6 +9,7 @@ import {
   KeyRound,
   Network,
   ShieldCheck,
+  Smartphone,
   Trash2,
   UserRoundCheck,
 } from 'lucide-react';
@@ -27,7 +28,7 @@ const FLOW = [
   {
     step: '03',
     title: 'Verify and consume',
-    body: 'Your backend verifies the proof, checks live registry status, and atomically consumes the challenge.',
+    body: 'Your backend verifies the selected proof, checks live identity and exact device status, and atomically consumes the challenge.',
   },
 ];
 
@@ -40,14 +41,15 @@ export default function NexusLandingPage() {
         <div className="relative max-w-3xl">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 border border-white/15 text-xs font-semibold text-indigo-100 mb-5">
             <ShieldCheck className="w-3.5 h-3.5" />
-            Pre-production developer preview
+            Nexus v2 device delegation · developer preview
           </div>
           <h1 className="text-4xl sm:text-5xl font-bold tracking-tight mb-5">
             Prove control with <span className="text-indigo-300">ROwO Nexus</span>
           </h1>
           <p className="text-base sm:text-lg text-slate-300 leading-8 max-w-2xl">
-            Give pseudonymous users durable control of app resources without turning them into a
-            ROwO account, profile, or global identifier.
+            Give pseudonymous users durable control of app resources through an offline-capable
+            root and independently revocable device keys—without turning them into a ROwO account,
+            profile, or global identifier.
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
             <Link
@@ -92,8 +94,8 @@ export default function NexusLandingPage() {
         <div className="grid sm:grid-cols-2 gap-4">
           <Capability
             icon={KeyRound}
-            title="Local keys"
-            body="Identity keys stay inside the dedicated wallet origin and are never sent to the RP."
+            title="Separated key roles"
+            body="The non-exportable root administers identity devices; daily proofs use separate device keys."
           />
           <Capability
             icon={Network}
@@ -110,6 +112,61 @@ export default function NexusLandingPage() {
             title="Terminal disposal"
             body="Revocation is proven before local key material is removed, and it cannot be reversed."
           />
+        </div>
+      </section>
+
+      <section className="bg-slate-50 border border-slate-200 rounded-3xl p-6 sm:p-8">
+        <div className="max-w-3xl mb-6">
+          <div className="text-xs uppercase tracking-wide font-semibold text-indigo-600 mb-2">
+            Nexus v2 key model
+          </div>
+          <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 mb-3">
+            One identity, two deliberately different key roles
+          </h2>
+          <p className="text-slate-600 leading-7">
+            V2 keeps the existing self-certifying <code className="font-mono text-sm">nx1_…</code>{' '}
+            subject. It adds root-authorized device keys beneath that same identity, so existing RP
+            records do not need a subject migration.
+          </p>
+        </div>
+
+        <div className="grid md:grid-cols-2 gap-4">
+          <KeyRole
+            icon={KeyRound}
+            label="Identity authority"
+            title="Root key"
+            body="The original v1 signing key defines the subject. Keep it non-exportable and use it infrequently to issue or revoke devices."
+            points={[
+              'Authorizes and revokes any device under the subject',
+              'Can produce v1 proofs only when an RP explicitly allows them',
+              'Cannot be recovered or reconstructed from a device key',
+            ]}
+          />
+          <KeyRole
+            icon={Smartphone}
+            label="Daily-use delegate"
+            title="Device key"
+            body="A separate Ed25519 key proves the same subject through a signed v2 authorization and can be revoked independently."
+            points={[
+              'Produces nexus.ownership-proof.v2 proofs',
+              'Can activate and self-revoke only its own authorization',
+              'Cannot authorize siblings, replace the root, or emit a v1 proof',
+            ]}
+          />
+        </div>
+
+        <div className="mt-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-white border border-slate-200 rounded-2xl p-5">
+          <p className="text-sm text-slate-600 leading-6 max-w-2xl">
+            Existing v1 roots can opt into v2 without re-registration. V1 APIs and proofs remain
+            unchanged; v2-aware RPs negotiate the accepted proof protocols and check the exact
+            device authorization.
+          </p>
+          <Link
+            to="/nexus/docs/root-and-device-keys"
+            className="inline-flex items-center gap-1.5 text-sm font-semibold text-indigo-700 hover:text-indigo-800 shrink-0"
+          >
+            Read compatibility guide <ArrowRight className="w-4 h-4" />
+          </Link>
         </div>
       </section>
 
@@ -141,7 +198,7 @@ export default function NexusLandingPage() {
         <ActionCard
           icon={BookOpen}
           title="Read the Nexus docs"
-          body="Concepts, wallet transport, proof verification, lifecycle, APIs, and a release checklist."
+          body="Root/device roles, compatibility, wallet transport, proof verification, lifecycle, APIs, and a release checklist."
           to="/nexus/docs/introduction"
           label="Open documentation"
         />
@@ -187,6 +244,43 @@ function Capability({
       <Icon className="w-5 h-5 text-indigo-600 mb-4" />
       <h3 className="font-semibold text-slate-900 mb-1.5">{title}</h3>
       <p className="text-sm text-slate-600 leading-6">{body}</p>
+    </div>
+  );
+}
+
+function KeyRole({
+  icon: Icon,
+  label,
+  title,
+  body,
+  points,
+}: {
+  icon: typeof KeyRound;
+  label: string;
+  title: string;
+  body: string;
+  points: string[];
+}) {
+  return (
+    <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center">
+          <Icon className="w-5 h-5" />
+        </div>
+        <div>
+          <div className="text-xs uppercase tracking-wide font-semibold text-indigo-600">{label}</div>
+          <h3 className="font-semibold text-lg text-slate-900">{title}</h3>
+        </div>
+      </div>
+      <p className="text-sm text-slate-600 leading-6">{body}</p>
+      <ul className="mt-4 space-y-2">
+        {points.map((point) => (
+          <li key={point} className="flex items-start gap-2 text-sm text-slate-700 leading-5">
+            <ShieldCheck className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+            <span>{point}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
