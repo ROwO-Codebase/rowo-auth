@@ -7,6 +7,7 @@ import {
   FileJson,
   Fingerprint,
   FlaskConical,
+  KeyRound,
   Loader2,
   RefreshCw,
   Search,
@@ -14,7 +15,7 @@ import {
 } from 'lucide-react';
 import { clsx } from 'clsx';
 
-type PlaygroundMode = 'request' | 'status';
+type PlaygroundMode = 'request' | 'identity-status' | 'device-status';
 
 interface StatusResult {
   status: number;
@@ -40,6 +41,10 @@ function isCanonicalBase64Url(value: string, expectedBytes: number): boolean {
   }
 }
 
+function isCanonicalNexusId(value: string, prefix: 'nx1_' | 'nxd2_' | 'nxa2_'): boolean {
+  return value.startsWith(prefix) && isCanonicalBase64Url(value.slice(prefix.length), 32);
+}
+
 function randomNonce(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   let binary = '';
@@ -62,8 +67,8 @@ export default function NexusPlaygroundPage() {
           </div>
           <h1 className="text-3xl font-bold tracking-tight text-slate-900">Nexus playground</h1>
           <p className="text-sm text-slate-600 mt-2 max-w-2xl">
-            Explore negotiated v2 proof requests and public identity status without OAuth
-            credentials, private keys, or pasted live proofs.
+            Explore negotiated v2 proof requests and public identity or device-key status without
+            OAuth credentials, private keys, or pasted live proofs.
           </p>
         </div>
         <a
@@ -86,7 +91,7 @@ export default function NexusPlaygroundPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 min-[360px]:grid-cols-2 sm:inline-grid sm:w-auto w-full items-stretch gap-1 p-1 bg-slate-100 border border-slate-200 rounded-xl">
+      <div className="grid grid-cols-1 min-[480px]:grid-cols-3 sm:inline-grid sm:w-auto w-full items-stretch gap-1 p-1 bg-slate-100 border border-slate-200 rounded-xl">
         <ModeButton
           active={mode === 'request'}
           icon={FileJson}
@@ -95,15 +100,28 @@ export default function NexusPlaygroundPage() {
           onClick={() => setMode('request')}
         />
         <ModeButton
-          active={mode === 'status'}
+          active={mode === 'identity-status'}
           icon={Search}
           label="Identity status"
           controls="nexus-identity-status"
-          onClick={() => setMode('status')}
+          onClick={() => setMode('identity-status')}
+        />
+        <ModeButton
+          active={mode === 'device-status'}
+          icon={KeyRound}
+          label="Device status"
+          controls="nexus-device-status"
+          onClick={() => setMode('device-status')}
         />
       </div>
 
-      {mode === 'request' ? <RequestBuilder /> : <StatusLookup />}
+      {mode === 'request' ? (
+        <RequestBuilder />
+      ) : mode === 'identity-status' ? (
+        <IdentityStatusLookup />
+      ) : (
+        <DeviceStatusLookup />
+      )}
 
       <div className="grid sm:grid-cols-2 gap-4">
         <ServiceLink
@@ -319,15 +337,13 @@ const result = await nexus.requestProofV2(request, {
   );
 }
 
-function StatusLookup() {
+function IdentityStatusLookup() {
   const [subject, setSubject] = useState('');
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<StatusResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const normalizedSubject = subject.trim();
-  const validSubject =
-    normalizedSubject.startsWith('nx1_') &&
-    isCanonicalBase64Url(normalizedSubject.slice('nx1_'.length), 32);
+  const validSubject = isCanonicalNexusId(normalizedSubject, 'nx1_');
 
   const lookup = async () => {
     if (!validSubject) return;
@@ -422,50 +438,253 @@ function StatusLookup() {
         </button>
       </section>
 
-      <section
-        className="bg-white border border-slate-200 rounded-3xl p-6 min-h-72 min-w-0"
-        aria-live="polite"
-        aria-busy={pending}
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="font-semibold text-slate-900">Registry response</h2>
-          {result && (
-            <div className="flex items-center gap-2">
-              <span
-                className={clsx(
-                  'px-2 py-0.5 rounded-full text-xs font-semibold',
-                  result.ok
-                    ? 'bg-emerald-100 text-emerald-700'
-                    : 'bg-rose-100 text-rose-700',
-                )}
-              >
-                HTTP {result.status}
-              </span>
-              <span className="text-xs text-slate-400">{result.durationMs} ms</span>
-            </div>
-          )}
+      <RegistryResponse
+        pending={pending}
+        result={result}
+        error={error}
+        emptyMessage="A successful response includes public genesis, lifecycle sequence, timestamps, and a signed short-lived status statement. Unknown and revoked subjects must fail closed."
+      />
+    </div>
+  );
+}
+
+function DeviceStatusLookup() {
+  const [subject, setSubject] = useState('');
+  const [deviceId, setDeviceId] = useState('');
+  const [authorizationId, setAuthorizationId] = useState('');
+  const [pending, setPending] = useState(false);
+  const [result, setResult] = useState<StatusResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const normalizedSubject = subject.trim();
+  const normalizedDeviceId = deviceId.trim();
+  const normalizedAuthorizationId = authorizationId.trim();
+  const validSubject = isCanonicalNexusId(normalizedSubject, 'nx1_');
+  const validDeviceId = isCanonicalNexusId(normalizedDeviceId, 'nxd2_');
+  const validAuthorizationId = isCanonicalNexusId(normalizedAuthorizationId, 'nxa2_');
+  const requestIsValid = validSubject && validDeviceId && validAuthorizationId;
+
+  const clearResponse = () => {
+    setResult(null);
+    setError(null);
+  };
+
+  const lookup = async () => {
+    if (!requestIsValid) return;
+    setPending(true);
+    setResult(null);
+    setError(null);
+    const started = performance.now();
+
+    try {
+      const response = await fetch(`${__NEXUS_API_ENDPOINT__}/v2/device/status`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/nexus+json',
+          'Content-Type': 'application/nexus+json',
+        },
+        body: JSON.stringify({
+          subject: normalizedSubject,
+          deviceId: normalizedDeviceId,
+          authorizationId: normalizedAuthorizationId,
+        }),
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'error',
+      });
+      const raw = await response.text();
+      let body = raw;
+      try {
+        body = JSON.stringify(JSON.parse(raw), null, 2);
+      } catch {
+        // Preserve a non-JSON response for diagnosis without interpreting it as trusted status.
+      }
+      setResult({
+        status: response.status,
+        ok: response.ok,
+        body,
+        durationMs: Math.round(performance.now() - started),
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'The device status request failed.');
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div id="nexus-device-status" className="grid lg:grid-cols-[0.85fr_1.15fr] gap-5 items-start">
+      <section className="bg-white border border-slate-200 rounded-3xl p-6">
+        <div className="w-11 h-11 rounded-2xl bg-indigo-50 text-indigo-700 flex items-center justify-center mb-4">
+          <KeyRound className="w-6 h-6" />
+        </div>
+        <h2 className="font-semibold text-slate-900 mb-1">V2 device-key status lookup</h2>
+        <p className="text-sm text-slate-600 leading-6 mb-5">
+          Check the exact identity, device, and root authorization tuple required by a v2 proof.
+          These public identifiers stay in component memory and are sent only in the request body.
+        </p>
+
+        <div className="space-y-4">
+          <Field
+            id="nexus-device-subject"
+            label="Nexus subject"
+            hint="nx1_ followed by a canonical 32-byte hash"
+          >
+            <input
+              id="nexus-device-subject"
+              value={subject}
+              onChange={(event) => {
+                setSubject(event.target.value);
+                clearResponse();
+              }}
+              placeholder="nx1_…"
+              aria-invalid={subject.length > 0 && !validSubject}
+              aria-describedby={`nexus-device-subject-hint${
+                subject.length > 0 && !validSubject ? ' nexus-device-subject-error' : ''
+              }`}
+              className={FIELD_CLASS}
+              spellCheck={false}
+              autoComplete="off"
+            />
+            {subject && !validSubject && (
+              <p id="nexus-device-subject-error" className="text-xs text-rose-700 mt-2">
+                Enter a canonical <code className="font-mono">nx1_</code> subject.
+              </p>
+            )}
+          </Field>
+
+          <Field
+            id="nexus-device-id"
+            label="Device ID"
+            hint="nxd2_ identifier from the v2 ownership proof"
+          >
+            <input
+              id="nexus-device-id"
+              value={deviceId}
+              onChange={(event) => {
+                setDeviceId(event.target.value);
+                clearResponse();
+              }}
+              placeholder="nxd2_…"
+              aria-invalid={deviceId.length > 0 && !validDeviceId}
+              aria-describedby={`nexus-device-id-hint${
+                deviceId.length > 0 && !validDeviceId ? ' nexus-device-id-error' : ''
+              }`}
+              className={FIELD_CLASS}
+              spellCheck={false}
+              autoComplete="off"
+            />
+            {deviceId && !validDeviceId && (
+              <p id="nexus-device-id-error" className="text-xs text-rose-700 mt-2">
+                Enter a canonical <code className="font-mono">nxd2_</code> device ID.
+              </p>
+            )}
+          </Field>
+
+          <Field
+            id="nexus-authorization-id"
+            label="Authorization ID"
+            hint="nxa2_ identifier from the root-signed device authorization"
+          >
+            <input
+              id="nexus-authorization-id"
+              value={authorizationId}
+              onChange={(event) => {
+                setAuthorizationId(event.target.value);
+                clearResponse();
+              }}
+              placeholder="nxa2_…"
+              aria-invalid={authorizationId.length > 0 && !validAuthorizationId}
+              aria-describedby={`nexus-authorization-id-hint${
+                authorizationId.length > 0 && !validAuthorizationId
+                  ? ' nexus-authorization-id-error'
+                  : ''
+              }`}
+              className={FIELD_CLASS}
+              spellCheck={false}
+              autoComplete="off"
+            />
+            {authorizationId && !validAuthorizationId && (
+              <p id="nexus-authorization-id-error" className="text-xs text-rose-700 mt-2">
+                Enter a canonical <code className="font-mono">nxa2_</code> authorization ID.
+              </p>
+            )}
+          </Field>
         </div>
 
-        {error && (
-          <div role="alert" className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-sm text-rose-800">
-            Request failed: {error}
-          </div>
-        )}
-
-        {result ? (
-          <pre className="bg-slate-900 text-slate-100 rounded-xl p-4 overflow-auto text-xs leading-relaxed max-h-[32rem]">
-            {result.body}
-          </pre>
-        ) : (
-          <div className="h-52 rounded-2xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center px-6 text-center">
-            <p className="text-sm text-slate-500 max-w-sm">
-              A successful response includes public genesis, lifecycle sequence, timestamps, and a
-              signed short-lived status statement. Unknown and revoked subjects must fail closed.
-            </p>
-          </div>
-        )}
+        <button
+          type="button"
+          onClick={lookup}
+          disabled={!requestIsValid || pending}
+          className="mt-5 w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {pending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+          Check device status
+        </button>
       </section>
+
+      <RegistryResponse
+        pending={pending}
+        result={result}
+        error={error}
+        emptyMessage="A successful response includes the combined identity and exact device states, authorization expiry, and a signed short-lived v2 status statement. Any tuple mismatch must fail closed."
+      />
     </div>
+  );
+}
+
+function RegistryResponse({
+  pending,
+  result,
+  error,
+  emptyMessage,
+}: {
+  pending: boolean;
+  result: StatusResult | null;
+  error: string | null;
+  emptyMessage: string;
+}) {
+  return (
+    <section
+      className="bg-white border border-slate-200 rounded-3xl p-6 min-h-72 min-w-0"
+      aria-live="polite"
+      aria-busy={pending}
+    >
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="font-semibold text-slate-900">Registry response</h2>
+        {result && (
+          <div className="flex items-center gap-2">
+            <span
+              className={clsx(
+                'px-2 py-0.5 rounded-full text-xs font-semibold',
+                result.ok
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : 'bg-rose-100 text-rose-700',
+              )}
+            >
+              HTTP {result.status}
+            </span>
+            <span className="text-xs text-slate-400">{result.durationMs} ms</span>
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div role="alert" className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-sm text-rose-800">
+          Request failed: {error}
+        </div>
+      )}
+
+      {result ? (
+        <pre className="bg-slate-900 text-slate-100 rounded-xl p-4 overflow-auto text-xs leading-relaxed max-h-[32rem]">
+          {result.body}
+        </pre>
+      ) : (
+        <div className="h-52 rounded-2xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center px-6 text-center">
+          <p className="text-sm text-slate-500 max-w-sm">{emptyMessage}</p>
+        </div>
+      )}
+    </section>
   );
 }
 
