@@ -11,6 +11,9 @@ const ALLOWED_NEXT_ORIGINS = new Set([
   'https://developers.rowo.link',
   'https://academic.rowo.link',
   'http://localhost:5174',
+  'http://localhost:8787',
+  'https://platform-staging.rowo.link',
+  'https://platform.rowo.link',
 ]);
 
 function isAllowedNext(rawNext: string | null): URL | null {
