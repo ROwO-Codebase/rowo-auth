@@ -56,7 +56,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <img src={__ICON_URL__} alt="ROwO Auth Logo" className="w-8 h-8 rounded-xl" referrerPolicy="no-referrer" />
-            <span className="font-semibold text-lg tracking-tight text-slate-800">ROwO Auth</span>
+            <span className="font-semibold text-lg tracking-tight text-slate-800">
+              ROwO <span className="text-indigo-600">Auth</span>
+            </span>
           </div>
           <nav className="flex gap-1 items-center">
             {navItems.map((item) => {
